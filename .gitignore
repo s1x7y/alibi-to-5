@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# Logs (the routine writes to ~/Library/Logs, but ignore any stray local logs)
+*.log
