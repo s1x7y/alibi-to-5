@@ -4,6 +4,28 @@ These are queued for a `superpowers:brainstorming` → `superpowers:writing-plan
 pass before any implementation. Each has open questions to resolve during
 brainstorming.
 
+## Shipped 2026-07-02 — humanize + workday shape + break controls
+Randomized jiggle cadence/distance, random morning start delay, explicit
+end-of-day (`--until`), jittered lunch gap (`--lunch`/`--no-lunch`), and on-demand
+`pause [DURATION]` / `resume`. The activity loop is now one predicate
+(`should_jiggle` = not lunch, not paused). Design:
+`docs/superpowers/specs/2026-07-01-humanize-schedule-breaks-design.md`.
+**To confirm on a real wake:** the loop honors lunch/pause transitions live, and
+Away actually shows during lunch/pause. Deferred: time-shift work delivery (its
+own tool), keystroke input, per-day distinct schedules.
+
+## 0. Codex ping under launchd — FIXED, verify on next real wake
+On the 2026-07-01 wake the Codex ping was skipped ("codex CLI not found via login
+shell PATH"); the usage window did not start at wake (reset drifted to first manual
+use). Root cause: `resolve_bin` used `/bin/zsh -lc` (login, non-interactive), but
+`~/.local/bin` (where `codex` lives) is added in `~/.zshrc`, which zsh sources only
+for *interactive* shells — so under launchd's minimal env the binary was never on
+PATH. Fixed by switching to an interactive login shell (`-ilc`) + stdin from
+/dev/null. Verified in a simulated clean/tty-less env; **still to confirm on a real
+scheduled wake** — check `~/Library/Logs/alibi-to-5.log` shows "Codex '...'
+dispatched" (not the "not found" warning) and that the usage window resets 5h after
+wake time.
+
 ## 1. Linux support
 Today the script is macOS-only. Map each piece to a Linux equivalent and decide
 how to keep one script vs. split by OS.
@@ -19,34 +41,32 @@ how to keep one script vs. split by OS.
   OS switch, or `alibi-to-5-macos.sh` / `alibi-to-5-linux.sh`? Distro/init
   assumptions (systemd-only?).
 
-## 2. Microsoft Teams support
-Mostly config + a doc note, but verify the "active" behavior.
-- Add `"Microsoft Teams"` to `OPEN_APPS` (and confirm the exact .app name).
-- Confirm the cliclick jiggle keeps Teams "Available" (Teams away threshold ~5 min;
-  default 60s interval already clears it). Test the real status.
-- **Open Qs:** does Teams need the window focused/foreground, or is idle-timer
-  reset enough? Any Teams setting that overrides presence (e.g. "show as Away when
-  inactive for X")?
+## 2. Microsoft Teams support — DONE (2026-07-01)
+Shipped as the `--teams` / `--no-teams` toggle (`ENABLE_TEAMS`, default off):
+appends `"Microsoft Teams"` to the effective open list. Design decision: idle-
+timer reset via the existing 60s jiggle is treated as sufficient (Teams away
+threshold ~5 min), no window-focus logic added. **Still to confirm on a real
+wake:** that Teams actually stays "Available" with only the jiggle — if it flips
+to Away, revisit (focus/foreground or a Teams presence setting) as a follow-up.
 
-## 3. Claude support
-By analogy to the Codex usage-window ping.
-- **Open Qs:** what does "Claude support" mean here — (a) ping the Claude Code CLI
-  headlessly to start a usage window (like `codex exec`), (b) open the Claude
-  desktop app via `OPEN_APPS`, or (c) both? If CLI: confirm the exact non-
-  interactive command + a read-only/no-side-effects equivalent. Resolve the binary
-  via the same `resolve_bin` login-shell trick.
+## 3. Claude support — DONE (2026-07-01)
+Shipped as the `--claude` / `--no-claude` toggle (`ENABLE_CLAUDE`, default off):
+headless `claude -p "$CLAUDE_PROMPT"` via the same `resolve_bin` (`-ilc`) helper,
+mirroring the Codex ping. Chosen meaning: CLI usage-window ping only (not opening
+the desktop app). **To confirm during first real use:** that plain `-p` is the
+right no-side-effects invocation and the usage window actually starts.
 
-## 4. "Good morning" message
-Send a greeting as part of the wake routine.
-- **Open Qs (need answers before design):**
-  - Destination: a Slack message (DM to self? a channel?), a Teams message, a macOS
-    notification, spoken via `say`, or just a log line?
-  - If Slack/Teams: via the desktop app (hard to script reliably) or an API/webhook
-    (needs a token/webhook URL — secret handling, and keep it out of the public repo)?
-  - Content: static text, time-aware, or dynamic?
-  - Timing: at wake, or slightly after apps open?
-- Note: the user referenced "point 2 of the notes" — clarify which note they meant;
-  current README notes don't describe a message feature.
+## 4. "Good morning" message — DONE (2026-07-01)
+Shipped as `--good-morning "TEXT"` + `--gm-platform slack|teams` (`GOOD_MORNING_TEXT`
+empty = off). Decisions from brainstorming: Slack/Teams **incoming webhook**
+(`curl`, `{"text":…}` payload), URL kept out of the repo in
+`~/.config/alibi-to-5/secrets` (gitignored; `secrets.example` shipped), content is
+user-supplied on `set` with `{time}/{date}/{day}` tokens, posted after apps open.
+**To confirm on a real wake:** an actual post lands in the target channel; mind the
+Teams Workflows/Adaptive-Card caveat noted in the README if using Teams.
+Deferred (out of scope): API-token transport and DM-to-self.
+
+See `docs/superpowers/specs/2026-07-01-feature-toggles-design.md` for the design.
 
 ## Cross-cutting
 - Keep the single-script + subcommand shape; new behavior should stay config-driven

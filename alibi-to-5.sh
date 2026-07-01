@@ -5,19 +5,28 @@
 # "run" command, so there is no separate install/uninstall script.
 #
 # Commands you use:
-#   alibi-to-5.sh set [HH:MM]   Schedule a Mon-Fri wake + install the agent.
-#                               Prompts for the time if you omit it.
-#   alibi-to-5.sh unset         Cancel the schedule + remove the agent.
-#   alibi-to-5.sh test          Run the routine now and show the log tail.
-#   alibi-to-5.sh status        Show the schedule, agent state, recent log.
-#   alibi-to-5.sh help          Show usage.
+#   alibi-to-5.sh set [HH:MM] [flags]   Schedule a Mon-Fri wake + install agent.
+#                                       Prompts for the time if you omit it.
+#   alibi-to-5.sh unset                 Cancel the schedule, remove the agent,
+#                                       and stop a running routine.
+#   alibi-to-5.sh test [flags]          Run the routine now and show the log tail.
+#   alibi-to-5.sh pause [DURATION]      Take a break: stop looking active now.
+#   alibi-to-5.sh resume                End a pause.
+#   alibi-to-5.sh status                Show the schedule, agent state, log.
+#   alibi-to-5.sh help                  Show usage (lists the feature flags).
 #
 # Internal (the LaunchAgent calls this; you never type it yourself):
-#   alibi-to-5.sh run           The wake routine itself.
+#   alibi-to-5.sh run [flags]           The wake routine itself.
 #
-# The routine: keep the Mac awake (caffeinate), jiggle the mouse (cliclick) so
-# Slack/Teams do not show you "away", open your apps, and fire a one-shot
-# "are you there" at the Codex CLI to start its usage window.
+# The routine: keep the Mac awake (caffeinate), run a humanized activity loop
+# (cliclick with randomized cadence/distance) so Slack/Teams do not show you
+# "away", shaped to a workday (optional end time + a jittered lunch gap where you
+# intentionally go Away, plus a random morning start delay and on-demand
+# pause/resume), open the enabled apps (Slack/Teams), ping the enabled CLIs
+# (Codex/Claude) to start their usage windows, and optionally post a good-morning
+# message to a Slack/Teams webhook. Every integration is an independent toggle --
+# a config default plus a --flag/--no-flag on 'set' that is baked into the agent.
+# See usage() / the README for the flags.
 #
 # Logs to ~/Library/Logs/alibi-to-5.log
 
@@ -28,11 +37,47 @@ WAKE_DAYS="MTWRF"                                  # Mon-Fri
 PLIST_LABEL="com.user.alibi-to-5"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 LOG="$HOME/Library/Logs/alibi-to-5.log"
-KEEP_AWAKE_SECONDS=32400                           # caffeinate hold ~9h after wake
-JIGGLE_INTERVAL_SECONDS=60                         # nudge cadence; keep < away threshold (Teams ~5m, Slack ~10m)
-JIGGLE_PIXELS=3                                    # nudge distance; returns to origin each time
+PIDFILE="$HOME/Library/Logs/alibi-to-5.pids"       # PIDs of the running routine (caffeinate + loop), so 'unset' can stop them
+CONTROLFILE="$HOME/Library/Logs/alibi-to-5.control" # pause state: a "paused-until" epoch (0 = indefinite)
+STATEFILE="$HOME/Library/Logs/alibi-to-5.state"    # today's resolved window/lunch epochs, for 'status'
+KEEP_AWAKE_SECONDS=32400                            # fallback active-window length (~9h) when WORK_END is unset
+
+# Humanized jiggle: cadence and distance are randomized per nudge so the activity
+# does not look like a metronome. Keep the MAX interval under the away threshold
+# (Teams ~5m, Slack ~10m).
+JIGGLE_MIN_SECONDS=45                               # nudge cadence, lower bound
+JIGGLE_MAX_SECONDS=120                              # nudge cadence, upper bound
+JIGGLE_MIN_PIXELS=1                                 # nudge distance, lower bound (returns to origin)
+JIGGLE_MAX_PIXELS=8                                 # nudge distance, upper bound
+START_JITTER_MAX_SECONDS=600                        # random 0..this delay before activity begins (0 disables)
+PAUSE_POLL_SECONDS=30                               # how often the loop re-checks lunch/pause state
+
+# Workday shape. WORK_END sets an explicit end-of-day (else KEEP_AWAKE_SECONDS is
+# used). LUNCH_START enables a mid-day idle gap (you show "Away" like a real
+# person, then resume). Empty = off. Both are also flags on 'set' (--until,
+# --lunch/--no-lunch), baked into the agent.
+WORK_END=""                                        # "HH:MM" end-of-day; empty -> use KEEP_AWAKE_SECONDS
+LUNCH_START=""                                      # "HH:MM" lunch start; empty -> no lunch gap
+LUNCH_MINUTES=45                                    # lunch length
+LUNCH_JITTER_MINUTES=10                             # +/- randomization on lunch start and length, rolled per day
+
+# Feature toggles (defaults). Each is also a --flag / --no-flag on 'set', and the
+# resolved choice is baked into the LaunchAgent, so it applies on every wake.
+ENABLE_SLACK=1                                     # open Slack.app
+ENABLE_TEAMS=0                                     # open Microsoft Teams.app
+ENABLE_CODEX=1                                     # ping the Codex CLI to start its usage window
+ENABLE_CLAUDE=0                                    # ping the Claude CLI to start its usage window
 CODEX_PROMPT="are you there"
-OPEN_APPS=("Slack")                                # apps to open on wake; add "Microsoft Teams", etc.
+CLAUDE_PROMPT="are you there"
+
+# Good-morning message: non-empty text (or --good-morning "TEXT" on 'set') posts to
+# a Slack/Teams incoming webhook after the apps open. {time}/{date}/{day} tokens are
+# interpolated at wake. Webhook URLs live OUTSIDE the repo, in SECRETS_FILE.
+GOOD_MORNING_TEXT=""
+GOOD_MORNING_PLATFORM="slack"                      # slack | teams
+SECRETS_FILE="$HOME/.config/alibi-to-5/secrets"    # sourced: SLACK_WEBHOOK_URL / TEAMS_WEBHOOK_URL
+
+OPEN_APPS=()                                       # any OTHER apps to open (Slack/Teams have their own toggles)
 
 # Absolute path to THIS script, baked into the agent so it can call us back.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -42,26 +87,301 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
 say() { printf '%s\n' "$*"; }
 app_installed() { [ -d "/Applications/$1.app" ] || [ -d "$HOME/Applications/$1.app" ]; }
 
-# Resolve a CLI through a login shell: launchd runs with a minimal PATH, so we
-# pick up Homebrew / npm-global / etc. the same way an interactive shell would.
+# Resolve a CLI the same way an interactive shell would: launchd runs with a
+# minimal PATH, so we source the user's shell config to pick up Homebrew,
+# ~/.local/bin, npm-global, etc. We use an *interactive* login shell (-i, not
+# just -l): zsh only sources ~/.zshrc for interactive shells, and that is where
+# PATH additions like ~/.local/bin typically live -- a plain login shell (-l)
+# reads .zprofile/.zlogin but NOT .zshrc, so it misses them under launchd.
+# stdin from /dev/null so a stray interactive prompt can never block us.
 # Pass the name as a positional ($1 inside the -c script) rather than
 # interpolating it into the command string, so it is never treated as code.
-resolve_bin() { /bin/zsh -lc 'command -v -- "$1"' zsh "$1" 2>/dev/null; }
+resolve_bin() { /bin/zsh -ilc 'command -v -- "$1"' zsh "$1" </dev/null 2>/dev/null; }
+
+# JSON-escape a string for a {"text":"..."} webhook payload -- dependency-free.
+# Order matters: double the backslashes FIRST, so the escapes we add below are
+# not themselves re-doubled.
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+# XML-escape a string so user-supplied greeting text can be baked into the plist
+# as a <string>. Ampersand FIRST, for the same reason as above.
+xml_escape() {
+  local s=$1
+  s=${s//&/&amp;}
+  s=${s//</&lt;}
+  s=${s//>/&gt;}
+  printf '%s' "$s"
+}
+
+# Fill {time}/{date}/{day} tokens in a greeting at send time; unknown tokens are
+# left as-is.
+interpolate() {
+  local s=$1
+  s=${s//\{time\}/$(date '+%H:%M')}
+  s=${s//\{date\}/$(date '+%Y-%m-%d')}
+  s=${s//\{day\}/$(date '+%A')}
+  printf '%s' "$s"
+}
+
+# Random integer in [LO, HI] inclusive. Degenerate ranges (HI <= LO) return LO,
+# so callers never divide by zero or get an out-of-range value.
+rand_between() {
+  local lo=$1 hi=$2
+  [ "$hi" -le "$lo" ] && { echo "$lo"; return; }
+  echo $(( lo + RANDOM % (hi - lo + 1) ))
+}
+
+# True (0) when START <= NOW < END for a valid window. Empty/zero/degenerate
+# windows count as "not in window", so a disabled lunch gap is simply never hit.
+in_window() {
+  local now=$1 s=$2 e=$3
+  [ -n "$s" ] && [ -n "$e" ] || return 1
+  [ "$s" -gt 0 ] && [ "$e" -gt "$s" ] || return 1
+  [ "$now" -ge "$s" ] && [ "$now" -lt "$e" ]
+}
+
+# True (0) when a pause is in effect. The control file holds a "paused-until"
+# epoch: 0 means indefinite (until 'resume'); a positive value pauses until then.
+# No file = not paused.
+is_paused() {
+  local cf=$1 now=$2 until
+  [ -f "$cf" ] || return 1
+  until=$(cat "$cf" 2>/dev/null)
+  [ -n "$until" ] || return 1
+  [ "$until" -le 0 ] && return 0
+  [ "$now" -lt "$until" ]
+}
+
+# Parse a break duration to seconds: NNs / NNm / NNh, or a bare number = minutes.
+# Echoes the seconds; returns 1 on anything malformed.
+parse_duration() {
+  local s=$1 n unit
+  n=${s%[smh]}
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  case "$s" in
+    *s) unit=s ;;
+    *h) unit=h ;;
+    *m) unit=m ;;
+    *)  unit=m ;;   # bare number = minutes
+  esac
+  case "$unit" in
+    s) echo "$n" ;;
+    m) echo $(( n * 60 )) ;;
+    h) echo $(( n * 3600 )) ;;
+  esac
+}
+
+# "HH:MM" -> today's epoch for that wall-clock time (macOS BSD date).
+hm_to_epoch() {
+  date -j -f "%Y-%m-%d %H:%M" "$(date +%F) $1" +%s 2>/dev/null
+}
+
+# True (0) when the loop should nudge right now: not in the lunch gap and not
+# manually paused. Composes the tested predicates above.
+should_jiggle() {
+  local now=$1 ls=$2 le=$3 cf=$4
+  in_window "$now" "$ls" "$le" && return 1
+  is_paused "$cf" "$now" && return 1
+  return 0
+}
+
+# Resolve the day's schedule from the flags: the active-window end epoch, the
+# caffeinate duration derived from it, and today's (jittered) lunch window. Sets
+# WINDOW_END_EPOCH / CAFFEINATE_SECS / LUNCH_S_EPOCH / LUNCH_E_EPOCH.
+resolve_schedule() {
+  local now end base js jlen
+  now=$(date +%s)
+  # Active-window end: explicit WORK_END wins; else fall back to the duration.
+  # Also fall back if the end time is missing, malformed, or already past.
+  end=0
+  if [ -n "$FEAT_UNTIL" ] && [[ "$FEAT_UNTIL" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+    end=$(hm_to_epoch "$FEAT_UNTIL"); end=${end:-0}
+  fi
+  [ "$end" -le "$now" ] && end=$(( now + KEEP_AWAKE_SECONDS ))
+  WINDOW_END_EPOCH=$end
+  CAFFEINATE_SECS=$(( end - now ))
+
+  # Lunch gap: jitter start and length by +/- LUNCH_JITTER_MINUTES, clamp to the
+  # window. Disabled unless LUNCH_START is a valid time.
+  LUNCH_S_EPOCH=0; LUNCH_E_EPOCH=0
+  if [ -n "$FEAT_LUNCH_START" ] && [[ "$FEAT_LUNCH_START" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+    base=$(hm_to_epoch "$FEAT_LUNCH_START"); base=${base:-0}
+    if [ "$base" -gt 0 ]; then
+      js=$(( (RANDOM % (2 * LUNCH_JITTER_MINUTES + 1)) - LUNCH_JITTER_MINUTES ))
+      jlen=$(( (RANDOM % (2 * LUNCH_JITTER_MINUTES + 1)) - LUNCH_JITTER_MINUTES ))
+      LUNCH_S_EPOCH=$(( base + js * 60 ))
+      LUNCH_E_EPOCH=$(( LUNCH_S_EPOCH + (FEAT_LUNCH_MIN + jlen) * 60 ))
+      [ "$LUNCH_E_EPOCH" -gt "$WINDOW_END_EPOCH" ] && LUNCH_E_EPOCH=$WINDOW_END_EPOCH
+    fi
+  fi
+}
+
+# Resolve the feature toggles: start from the config-constant defaults, then
+# apply CLI flags. Shared by 'set' (to record the choice) and 'run'/'test' (to
+# act on it), so the same argv means the same thing everywhere. Sets the FEAT_*
+# and GM_* globals. Unknown args are ignored so a mixed argv can be passed in.
+parse_feature_flags() {
+  FEAT_SLACK=$ENABLE_SLACK
+  FEAT_TEAMS=$ENABLE_TEAMS
+  FEAT_CODEX=$ENABLE_CODEX
+  FEAT_CLAUDE=$ENABLE_CLAUDE
+  GM_TEXT=$GOOD_MORNING_TEXT
+  GM_PLATFORM=$GOOD_MORNING_PLATFORM
+  FEAT_UNTIL=$WORK_END
+  FEAT_LUNCH_START=$LUNCH_START
+  FEAT_LUNCH_MIN=$LUNCH_MINUTES
+  local l
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --slack)           FEAT_SLACK=1 ;;
+      --no-slack)        FEAT_SLACK=0 ;;
+      --teams)           FEAT_TEAMS=1 ;;
+      --no-teams)        FEAT_TEAMS=0 ;;
+      --codex)           FEAT_CODEX=1 ;;
+      --no-codex)        FEAT_CODEX=0 ;;
+      --claude)          FEAT_CLAUDE=1 ;;
+      --no-claude)       FEAT_CLAUDE=0 ;;
+      --good-morning)    shift; GM_TEXT=${1:-} ;;
+      --no-good-morning) GM_TEXT="" ;;
+      --gm-platform)     shift; GM_PLATFORM=${1:-slack} ;;
+      --until)           shift; FEAT_UNTIL=${1:-} ;;
+      --lunch)           shift; l=${1:-}
+                         FEAT_LUNCH_START=${l%%/*}
+                         case "$l" in */*) FEAT_LUNCH_MIN=${l##*/} ;; esac ;;
+      --no-lunch)        FEAT_LUNCH_START="" ;;
+    esac
+    shift
+  done
+}
+
+# Serialize the resolved toggles into an explicit, canonical flag array (CANON),
+# for baking into the plist. Fully explicit (--slack AND --no-slack are emitted
+# as appropriate) so a live schedule never depends on the config defaults, which
+# may be edited later.
+build_canonical_flags() {
+  CANON=()
+  [ "$FEAT_SLACK"  = 1 ] && CANON+=(--slack)  || CANON+=(--no-slack)
+  [ "$FEAT_TEAMS"  = 1 ] && CANON+=(--teams)  || CANON+=(--no-teams)
+  [ "$FEAT_CODEX"  = 1 ] && CANON+=(--codex)  || CANON+=(--no-codex)
+  [ "$FEAT_CLAUDE" = 1 ] && CANON+=(--claude) || CANON+=(--no-claude)
+  if [ -n "$GM_TEXT" ]; then
+    CANON+=(--good-morning "$GM_TEXT" --gm-platform "$GM_PLATFORM")
+  fi
+  [ -n "$FEAT_UNTIL" ] && CANON+=(--until "$FEAT_UNTIL")
+  if [ -n "$FEAT_LUNCH_START" ]; then
+    CANON+=(--lunch "$FEAT_LUNCH_START/$FEAT_LUNCH_MIN")
+  else
+    CANON+=(--no-lunch)
+  fi
+}
+
+# POST plain text to an incoming webhook. curl -f makes a 4xx/5xx a failure we
+# can log. Output (and any error) goes to the log.
+post_webhook() {
+  local url=$1 text=$2
+  curl -fsS -X POST -H 'Content-Type: application/json' \
+    --data "{\"text\":\"$(json_escape "$text")\"}" "$url" >>"$LOG" 2>&1
+}
+
+# Send the good-morning greeting when configured: source the out-of-repo secrets
+# file for the webhook URL, interpolate tokens, and post. Warn-and-skip on any
+# missing piece so a wake is never blocked by it.
+send_good_morning() {
+  local text=$1 platform=$2 url var
+  [ -n "$text" ] || return 0
+  if [ ! -f "$SECRETS_FILE" ]; then
+    log "WARNING: good-morning set but $SECRETS_FILE missing; skipped."
+    return 0
+  fi
+  # shellcheck disable=SC1090
+  . "$SECRETS_FILE"
+  case "$platform" in
+    teams) var=TEAMS_WEBHOOK_URL ;;
+    *)     var=SLACK_WEBHOOK_URL ;;
+  esac
+  url=${!var:-}
+  if [ -z "$url" ]; then
+    log "WARNING: good-morning platform '$platform' has no $var in $SECRETS_FILE; skipped."
+    return 0
+  fi
+  if post_webhook "$url" "$(interpolate "$text")"; then
+    log "Good-morning message posted to $platform."
+  else
+    log "WARNING: good-morning post to $platform failed (see curl output above)."
+  fi
+}
+
+# Stop an in-flight routine started by a previous 'run': the caffeinate hold and
+# the activity loop, both recorded in PIDFILE. Both self-terminate at the window
+# end, but this lets 'unset' end them now. We match on IDENTITY (the recorded PID
+# must still look like one of ours -- our script, or our caffeinate invocation),
+# never a bare recorded PID, so a recycled PID can't take down an unrelated
+# process. Returns 0 if it stopped anything, 1 if nothing ran.
+stop_routine() {
+  local killed=1 pid cmd
+  if [ -f "$PIDFILE" ]; then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      cmd="$(ps -p "$pid" -o command= 2>/dev/null)"
+      case "$cmd" in
+        *alibi-to-5*|*"caffeinate -dimsu"*)
+          pkill -P "$pid" 2>/dev/null   # reap any child (sleep/cliclick) of the loop
+          kill "$pid" 2>/dev/null
+          killed=0 ;;
+      esac
+    done <"$PIDFILE"
+    rm -f "$PIDFILE"
+  fi
+  rm -f "$STATEFILE"
+  return "$killed"
+}
 
 usage() {
   cat <<'EOF'
 alibi-to-5 - schedule a weekday Mac wake and run a wake routine.
 
 Usage:
-  alibi-to-5.sh set [HH:MM]   Schedule a Mon-Fri wake + install the agent.
-                              Prompts for the time if you omit it.
-  alibi-to-5.sh unset         Cancel the schedule + remove the agent.
-  alibi-to-5.sh test          Run the routine now and show the log tail.
-  alibi-to-5.sh status        Show the schedule, agent state, recent log.
-  alibi-to-5.sh help          Show this help.
+  alibi-to-5.sh set [HH:MM] [flags]   Schedule a Mon-Fri wake + install the agent.
+                                      Prompts for the time if you omit it.
+  alibi-to-5.sh unset                 Cancel the schedule, remove the agent, and
+                                      stop a running routine (caffeinate + loop).
+  alibi-to-5.sh test [flags]          Run the routine now and show the log tail.
+  alibi-to-5.sh pause [DURATION]      Take a break: stop looking active now (you
+                                      go "Away"). No DURATION = until 'resume';
+                                      else 30m / 1h / 90s / a number of minutes.
+  alibi-to-5.sh resume                End a pause and pick activity back up.
+  alibi-to-5.sh status                Show schedule, state, window/lunch, log.
+  alibi-to-5.sh help                  Show this help.
 
-On each weekday wake the routine keeps the Mac awake (caffeinate), jiggles the
-mouse (cliclick) so Slack/Teams stay active, opens your apps, and pings Codex.
+Feature flags (for 'set' and 'test'; each overrides its config default and is
+baked into the agent, so it applies on every wake):
+  --slack / --no-slack        Open Slack.app                 (default: on)
+  --teams / --no-teams        Open Microsoft Teams.app        (default: off)
+  --codex / --no-codex        Ping the Codex CLI usage window (default: on)
+  --claude / --no-claude      Ping the Claude CLI usage window (default: off)
+  --good-morning "TEXT"       Post TEXT to a webhook after apps open (off if unset).
+                              {time}/{date}/{day} tokens are filled in at wake.
+  --gm-platform slack|teams   Which webhook the greeting uses (default: slack).
+  --until HH:MM               End the active window at this time (default: ~9h).
+  --lunch HH:MM[/MIN]         Idle lunch gap (default 45m), jittered daily.
+  --no-lunch                  Disable the lunch gap.
+
+Example:
+  alibi-to-5.sh set 09:40 --teams --until 17:00 --lunch 13:00 \
+                --good-morning "Online {day} {time}"
+
+The activity loop humanizes itself: randomized nudge cadence/distance, a random
+morning start delay, an optional jittered lunch gap where you naturally show
+"Away", and on-demand pause/resume. The greeting needs a webhook URL in
+~/.config/alibi-to-5/secrets (see secrets.example); it is never committed.
 EOF
 }
 
@@ -70,7 +390,8 @@ EOF
 # the given time. StartCalendarInterval (not RunAtLoad) means launchd fires it
 # on the scheduled wake even if you are already logged in.
 write_plist() {
-  local hour="$1" min="$2" wd
+  local hour="$1" min="$2"; shift 2
+  local flags=("$@") f wd
   mkdir -p "$HOME/Library/LaunchAgents"
   {
     cat <<PLIST
@@ -85,6 +406,13 @@ write_plist() {
         <string>/bin/bash</string>
         <string>$SELF</string>
         <string>run</string>
+PLIST
+    # The resolved feature flags, so the agent calls `run` with the same choices
+    # you made at `set` time. xml_escape guards user-supplied greeting text.
+    for f in ${flags[@]+"${flags[@]}"}; do
+      printf '        <string>%s</string>\n' "$(xml_escape "$f")"
+    done
+    cat <<'PLIST'
     </array>
     <key>StartCalendarInterval</key>
     <array>
@@ -103,7 +431,12 @@ PLIST
 
 # ---- set [HH:MM] ----------------------------------------------------------
 cmd_set() {
+  # First arg is the optional HH:MM; anything starting with -- is a feature flag.
   local hm="${1:-}"
+  case "$hm" in
+    ""|--*) hm="" ;;   # no time given -> prompt; leave flags in "$@"
+    *)      shift ;;   # consume the time, leaving only flags in "$@"
+  esac
   if [ -z "$hm" ]; then
     read -r -p "Wake time in 24h HH:MM (e.g. 09:40): " hm
   fi
@@ -112,16 +445,21 @@ cmd_set() {
   fi
   local hour=$((10#${hm%%:*})) min=$((10#${hm##*:}))
 
+  # Resolve the toggles now and bake the canonical flags into the agent.
+  parse_feature_flags "$@"
+  build_canonical_flags
+
   say "Scheduling wake for $WAKE_DAYS at $hm (needs admin password)..."
   # 'wake' = wake from sleep (FileVault stays unlocked). Mac must be ASLEEP.
   sudo pmset repeat wake "$WAKE_DAYS" "$hm:00"
 
-  write_plist "$hour" "$min"
+  write_plist "$hour" "$min" "${CANON[@]}"
   launchctl unload "$PLIST_PATH" 2>/dev/null || true
   launchctl load "$PLIST_PATH"
 
   say
   say "Done - wake + routine scheduled at $hm, Mon-Fri."
+  say "Enabled: slack=$FEAT_SLACK teams=$FEAT_TEAMS codex=$FEAT_CODEX claude=$FEAT_CLAUDE good-morning=$([ -n "$GM_TEXT" ] && echo "$GM_PLATFORM" || echo off)"
   say "Runtime script: $SELF"
   say "(If you move/rename this script, just run 'set' again.)"
   say
@@ -138,42 +476,121 @@ cmd_unset() {
   sudo pmset repeat cancel
   launchctl unload "$PLIST_PATH" 2>/dev/null || true
   rm -f "$PLIST_PATH"
+  if stop_routine; then
+    say "Stopped the in-flight routine (caffeinate + activity loop)."
+  else
+    say "No running routine to stop."
+  fi
+  rm -f "$CONTROLFILE"
   say "Removed the schedule and the LaunchAgent."
   say "(Lock Screen / FileVault settings you changed by hand are left as-is.)"
 }
 
+# ---- pause [DURATION] / resume --------------------------------------------
+# Take a real break without shutting the routine down: pause stops the jiggle so
+# you go idle (and show "Away"); the running loop notices within PAUSE_POLL_SECONDS.
+cmd_pause() {
+  local dur="${1:-}" until secs
+  if [ -z "$dur" ]; then
+    until=0                                   # indefinite, until 'resume'
+  else
+    if ! secs=$(parse_duration "$dur"); then
+      say "ERROR: '$dur' is not a valid duration (e.g. 30m, 1h, 90s, or a number of minutes)."; exit 1
+    fi
+    until=$(( $(date +%s) + secs ))
+  fi
+  mkdir -p "$(dirname "$CONTROLFILE")"
+  echo "$until" >"$CONTROLFILE"
+  if [ "$until" -le 0 ]; then
+    say "Paused indefinitely - you'll show 'Away' within ${PAUSE_POLL_SECONDS}s. Run 'resume' to come back."
+  else
+    say "Paused until $(date -r "$until" '+%H:%M') (auto-resumes then; or run 'resume')."
+  fi
+}
+
+cmd_resume() {
+  if [ -f "$CONTROLFILE" ]; then
+    rm -f "$CONTROLFILE"
+    say "Resumed - activity picks back up within ${PAUSE_POLL_SECONDS}s."
+  else
+    say "Not paused."
+  fi
+}
+
 # ---- run (the routine the agent calls; not shown in help) -----------------
 cmd_run() {
+  parse_feature_flags "$@"
   log "==== alibi-to-5 run starting ===="
 
-  # 0. Keep the Mac awake. A scheduled wake on battery re-sleeps quickly
-  #    otherwise; caffeinate holds display + system awake for the work day.
-  /usr/bin/caffeinate -dimsu -t "$KEEP_AWAKE_SECONDS" >>"$LOG" 2>&1 &
-  log "caffeinate started: keeping awake for $((KEEP_AWAKE_SECONDS/3600))h."
+  # Fresh run: supersede any previous one and clear a stale pause (a pause never
+  # carries into a new day). PIDFILE lists the caffeinate + loop PIDs for 'unset'.
+  mkdir -p "$(dirname "$PIDFILE")"
+  : >"$PIDFILE"
+  rm -f "$CONTROLFILE"
 
-  # 1. Mouse jiggle so Slack/Teams do not mark you "away". Away status is driven
-  #    by OS idle time (seconds since the last HID event), and ANY event resets
-  #    it -- so distance is irrelevant, cadence is what matters. We nudge the
-  #    cursor and move it straight back so it never drifts.
+  # Resolve today's window + (jittered) lunch, and record them for 'status'.
+  resolve_schedule
+  { echo "window_end=$WINDOW_END_EPOCH"
+    echo "lunch_start=$LUNCH_S_EPOCH"
+    echo "lunch_end=$LUNCH_E_EPOCH"; } >"$STATEFILE"
+  log "Window ends $(date -r "$WINDOW_END_EPOCH" '+%H:%M'); lunch $([ "$LUNCH_S_EPOCH" -gt 0 ] && echo "$(date -r "$LUNCH_S_EPOCH" '+%H:%M')-$(date -r "$LUNCH_E_EPOCH" '+%H:%M')" || echo off)."
+
+  # 0. Keep the Mac awake. A scheduled wake on battery re-sleeps quickly
+  #    otherwise; caffeinate holds display + system awake until the window end.
+  #    It starts immediately (before any start-jitter) so we don't re-sleep.
+  /usr/bin/caffeinate -dimsu -t "$CAFFEINATE_SECS" >>"$LOG" 2>&1 &
+  echo "$!" >>"$PIDFILE"
+  log "caffeinate started (pid $!): keeping awake for ~$((CAFFEINATE_SECS/3600))h."
+
+  # 0b. Morning start jitter: hold off the visible activity a random 0..N seconds
+  #     so "came online" varies day to day (caffeinate already holds the machine).
+  if [ "$START_JITTER_MAX_SECONDS" -gt 0 ]; then
+    local delay; delay=$(rand_between 0 "$START_JITTER_MAX_SECONDS")
+    log "Start jitter: waiting ${delay}s before activity."
+    sleep "$delay"
+  fi
+
+  # 1. Activity loop. Away status is driven by OS idle time (seconds since the
+  #    last HID event); ANY event resets it, so distance is irrelevant and cadence
+  #    is what matters. Each cycle asks should_jiggle (not lunch, not paused): if
+  #    so, one jittered nudge then a random sleep; otherwise poll, letting the idle
+  #    timer climb so you show "Away" through lunch/breaks, then resume.
   local cliclick
   cliclick="$(resolve_bin cliclick)"
   if [ -n "$cliclick" ]; then
     (
-      end=$(( SECONDS + KEEP_AWAKE_SECONDS ))
-      while [ "$SECONDS" -lt "$end" ]; do
-        "$cliclick" "m:+${JIGGLE_PIXELS},+0" "m:-${JIGGLE_PIXELS},+0" >/dev/null 2>&1
-        sleep "$JIGGLE_INTERVAL_SECONDS"
+      while :; do
+        now=$(date +%s)
+        [ "$now" -ge "$WINDOW_END_EPOCH" ] && break
+        if should_jiggle "$now" "$LUNCH_S_EPOCH" "$LUNCH_E_EPOCH" "$CONTROLFILE"; then
+          px=$(rand_between "$JIGGLE_MIN_PIXELS" "$JIGGLE_MAX_PIXELS")
+          [ $((RANDOM % 2)) -eq 0 ] && sign=+ || sign=-
+          [ "$sign" = + ] && back=- || back=+
+          if [ $((RANDOM % 2)) -eq 0 ]; then
+            "$cliclick" "m:${sign}${px},+0" "m:${back}${px},+0" >/dev/null 2>&1
+          else
+            "$cliclick" "m:+0,${sign}${px}" "m:+0,${back}${px}" >/dev/null 2>&1
+          fi
+          sleep "$(rand_between "$JIGGLE_MIN_SECONDS" "$JIGGLE_MAX_SECONDS")"
+        else
+          sleep "$PAUSE_POLL_SECONDS"
+        fi
       done
     ) >>"$LOG" 2>&1 &
-    log "Mouse jiggle started via $cliclick (${JIGGLE_PIXELS}px every ${JIGGLE_INTERVAL_SECONDS}s)."
+    echo "$!" >>"$PIDFILE"
+    log "Activity loop started (pid $!) via $cliclick (${JIGGLE_MIN_PIXELS}-${JIGGLE_MAX_PIXELS}px every ${JIGGLE_MIN_SECONDS}-${JIGGLE_MAX_SECONDS}s)."
   else
     log "WARNING: cliclick not found (brew install cliclick); jiggle skipped - Slack/Teams may show away."
   fi
 
-  # 2. Open the configured apps. The empty-array-safe expansion keeps this
-  #    working under 'set -u' on macOS bash 3.2 even if OPEN_APPS is cleared.
-  local app
-  for app in ${OPEN_APPS[@]+"${OPEN_APPS[@]}"}; do
+  # 2. Open the apps: the Slack/Teams toggles plus any extra OPEN_APPS. The
+  #    empty-array-safe expansion keeps this working under 'set -u' on macOS
+  #    bash 3.2 even when the lists are empty.
+  local app apps=()
+  [ "$FEAT_SLACK" = 1 ] && apps+=("Slack")
+  [ "$FEAT_TEAMS" = 1 ] && apps+=("Microsoft Teams")
+  apps+=(${OPEN_APPS[@]+"${OPEN_APPS[@]}"})
+  for app in ${apps[@]+"${apps[@]}"}; do
     if app_installed "$app"; then
       open -a "$app" >>"$LOG" 2>&1
       log "Opened $app."
@@ -182,17 +599,31 @@ cmd_run() {
     fi
   done
 
-  # 3. Ping Codex to start its usage window (headless, read-only sandbox: it
-  #    only returns text -- no file changes, no commands -- but the request
+  # 3. Ping the enabled CLIs to start their usage windows (headless, read-only:
+  #    they only return text -- no file changes, no commands -- but the request
   #    starts a session, which begins the usage/rate-limit window).
-  local codex
-  codex="$(resolve_bin codex)"
-  if [ -n "$codex" ]; then
-    "$codex" exec --sandbox read-only "$CODEX_PROMPT" >>"$LOG" 2>&1 &
-    log "Codex '$CODEX_PROMPT' dispatched via $codex."
-  else
-    log "WARNING: codex CLI not found via login shell PATH; skipped."
+  local codex claude
+  if [ "$FEAT_CODEX" = 1 ]; then
+    codex="$(resolve_bin codex)"
+    if [ -n "$codex" ]; then
+      "$codex" exec --sandbox read-only "$CODEX_PROMPT" >>"$LOG" 2>&1 &
+      log "Codex '$CODEX_PROMPT' dispatched via $codex."
+    else
+      log "WARNING: codex CLI not found via login shell PATH; skipped."
+    fi
   fi
+  if [ "$FEAT_CLAUDE" = 1 ]; then
+    claude="$(resolve_bin claude)"
+    if [ -n "$claude" ]; then
+      "$claude" -p "$CLAUDE_PROMPT" >>"$LOG" 2>&1 &
+      log "Claude '$CLAUDE_PROMPT' dispatched via $claude."
+    else
+      log "WARNING: claude CLI not found via login shell PATH; skipped."
+    fi
+  fi
+
+  # 4. Good-morning message, once the apps are up (no-op unless configured).
+  send_good_morning "$GM_TEXT" "$GM_PLATFORM"
 
   log "==== run done ===="
 }
@@ -200,7 +631,7 @@ cmd_run() {
 # ---- test -----------------------------------------------------------------
 cmd_test() {
   say "Running the routine now... (this starts the real ~9h caffeinate + jiggle)"
-  cmd_run
+  cmd_run "$@"
   say "Recent log:"
   tail -n 15 "$LOG" 2>/dev/null || say "(no log yet)"
 }
@@ -214,6 +645,39 @@ cmd_status() {
   launchctl list 2>/dev/null | grep -i alibi-to-5 || say "(agent not loaded)"
   [ -f "$PLIST_PATH" ] && say "plist: $PLIST_PATH" || say "plist: (none)"
   say
+  say "== Routine =="
+  local pid running=0
+  if [ -f "$PIDFILE" ]; then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && running=1
+    done <"$PIDFILE"
+  fi
+  if [ "$running" = 1 ]; then
+    say "running (caffeinate holding the Mac awake). Use 'unset' to stop it now."
+  else
+    say "not running."
+  fi
+  # Today's resolved window + lunch (written by the last 'run').
+  if [ -f "$STATEFILE" ]; then
+    local k v we="" ls="" le="" now; now=$(date +%s)
+    while IFS='=' read -r k v; do
+      case "$k" in window_end) we=$v ;; lunch_start) ls=$v ;; lunch_end) le=$v ;; esac
+    done <"$STATEFILE"
+    [ -n "$we" ] && [ "$we" -gt 0 ] && say "active window until $(date -r "$we" '+%H:%M')."
+    if [ -n "$ls" ] && [ "$ls" -gt 0 ]; then
+      say "lunch gap $(date -r "$ls" '+%H:%M')-$(date -r "$le" '+%H:%M')$(in_window "$now" "$ls" "$le" && echo ' (now)')."
+    fi
+  fi
+  # Manual pause state.
+  if is_paused "$CONTROLFILE" "$(date +%s)"; then
+    local u; u=$(cat "$CONTROLFILE" 2>/dev/null)
+    if [ "${u:-0}" -le 0 ]; then
+      say "PAUSED (indefinite) - run 'resume' to come back."
+    else
+      say "PAUSED until $(date -r "$u" '+%H:%M') - or run 'resume'."
+    fi
+  fi
+  say
   say "== Recent log =="
   tail -n 15 "$LOG" 2>/dev/null || say "(no log yet)"
 }
@@ -221,13 +685,20 @@ cmd_status() {
 # ---- dispatch -------------------------------------------------------------
 main() {
   case "${1:-help}" in
-    set)            shift; cmd_set "${1:-}" ;;
+    set)            shift; cmd_set "$@" ;;
     unset)          cmd_unset ;;
-    run)            cmd_run ;;          # internal: invoked by the LaunchAgent
-    test)           cmd_test ;;
+    run)            shift; cmd_run "$@" ;;   # internal: invoked by the LaunchAgent
+    test)           shift; cmd_test "$@" ;;
+    pause)          shift; cmd_pause "${1:-}" ;;
+    resume)         cmd_resume ;;
     status)         cmd_status ;;
     help|-h|--help) usage ;;
     *) say "Unknown command: $1"; say; usage; exit 1 ;;
   esac
 }
-main "$@"
+
+# Run only when executed directly (launchd does `bash <this> run`); skip when the
+# file is sourced, so the functions above can be tested in isolation.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi
