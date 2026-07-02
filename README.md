@@ -5,6 +5,7 @@
 # alibi-to-5
 
 <p align="center">
+  <a href="https://github.com/s1x7y/alibi-to-5/actions/workflows/ci.yml"><img src="https://github.com/s1x7y/alibi-to-5/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white" alt="Platform: macOS">
   <img src="https://img.shields.io/badge/made%20with-bash-1f425f.svg?logo=gnubash&logoColor=white" alt="Made with Bash">
