@@ -4,6 +4,16 @@ These are queued for a `superpowers:brainstorming` → `superpowers:writing-plan
 pass before any implementation. Each has open questions to resolve during
 brainstorming.
 
+> **Resume here (paused 2026-07-02).** Brainstormed improvement ideas; user chose
+> to queue two clusters — **item 5 (Reliability & operability)** and **item 6
+> (More realism)** — to brainstorm into a spec next session. Their open questions
+> are listed under each. Also considered but **not** queued (revisit if wanted):
+> an **external config file** (`~/.config/alibi-to-5/config` so the public script
+> stays pristine across `git pull`), and an **integrations/flexibility** cluster
+> (Slack presence/status via API, per-day & one-off schedule overrides, CI running
+> shellcheck + the 61-test suite on push). Next step: `superpowers:brainstorming`
+> on items 5 and 6.
+
 ## Shipped 2026-07-02 — humanize + workday shape + break controls
 Randomized jiggle cadence/distance, random morning start delay, explicit
 end-of-day (`--until`), jittered lunch gap (`--lunch`/`--no-lunch`), and on-demand
@@ -14,17 +24,37 @@ end-of-day (`--until`), jittered lunch gap (`--lunch`/`--no-lunch`), and on-dema
 Away actually shows during lunch/pause. Deferred: time-shift work delivery (its
 own tool), keystroke input, per-day distinct schedules.
 
-## 0. Codex ping under launchd — FIXED, verify on next real wake
-On the 2026-07-01 wake the Codex ping was skipped ("codex CLI not found via login
-shell PATH"); the usage window did not start at wake (reset drifted to first manual
-use). Root cause: `resolve_bin` used `/bin/zsh -lc` (login, non-interactive), but
-`~/.local/bin` (where `codex` lives) is added in `~/.zshrc`, which zsh sources only
-for *interactive* shells — so under launchd's minimal env the binary was never on
-PATH. Fixed by switching to an interactive login shell (`-ilc`) + stdin from
-/dev/null. Verified in a simulated clean/tty-less env; **still to confirm on a real
-scheduled wake** — check `~/Library/Logs/alibi-to-5.log` shows "Codex '...'
-dispatched" (not the "not found" warning) and that the usage window resets 5h after
-wake time.
+## 0. Codex ping under launchd — TWO bugs, both FIXED; verify on next real wake
+Two separate defects, one after the other:
+
+**Bug A (PATH) — fixed 2026-07-01.** On the 2026-07-01 wake the ping was skipped
+("codex CLI not found via login shell PATH"). Root cause: `resolve_bin` used
+`/bin/zsh -lc` (login, non-interactive), but `~/.local/bin` (where `codex` lives)
+is added in `~/.zshrc`, which zsh sources only for *interactive* shells — so under
+launchd's minimal env the binary was never on PATH. Fixed by switching to an
+interactive login shell (`-ilc`) + stdin from /dev/null.
+
+**Bug B (process-group teardown) — fixed 2026-07-02.** On the 2026-07-02 wake the
+binary resolved and the log showed "Codex 'are you there' dispatched", but the
+message was never actually sent (no codex output ever followed in the log; "run
+done" landed the same second). Root cause: `run()` launches all persistent work as
+background jobs — caffeinate, the jiggle loop, AND the `codex exec`/`claude -p`
+pings — then returns immediately. The generated LaunchAgent plist did not set
+`AbandonProcessGroup`, so launchd flushes the job's process group when the main
+`run` process exits and kills every backgrounded child. `codex exec` needs ~4s
+(measured) but got ~0. Confirmed: this morning's caffeinate pid was already DEAD,
+so caffeinate and the jiggle loop were being killed too (the machine could sleep /
+show Away — a latent bug beyond just codex). Verified the mechanism with a
+throwaway launchd pair: child KILLED without `AbandonProcessGroup`, SURVIVES with
+`<true/>`. Fixed by emitting `<key>AbandonProcessGroup</key><true/>` in
+`write_plist` (regression test added: 64/64 pass). The installed plist was
+regenerated + reloaded so the fix is live.
+
+**Still to confirm on a real scheduled wake:** `~/Library/Logs/alibi-to-5.log`
+shows the codex reply text appended *after* "dispatched" (proof it completed, not
+just launched), and the usage window resets ~5h after wake time. NOTE: `codex exec`
+reads stdin ("Reading additional input from stdin...") — under launchd stdin is
+/dev/null so it gets EOF and proceeds; fine, but keep in mind if behavior changes.
 
 ## 1. Linux support
 Today the script is macOS-only. Map each piece to a Linux equivalent and decide
@@ -40,6 +70,44 @@ how to keep one script vs. split by OS.
 - **Open Qs:** support X11 only or Wayland too? One cross-platform script with an
   OS switch, or `alibi-to-5-macos.sh` / `alibi-to-5-linux.sh`? Distro/init
   assumptions (systemd-only?).
+
+## 5. Reliability & operability — catch the silent-failure modes
+Today several failures are silent (most importantly: `cliclick` no-ops without an
+Accessibility grant, so the jiggle "runs" but the cursor never moves and you still
+go Away). Add operability that surfaces these before a real wake.
+- **`doctor` / preflight check:** verify (a) `cliclick` can actually move the
+  cursor — Accessibility is granted, not just installed; (b) `cliclick`/`codex`/
+  `claude` resolve via `resolve_bin`; (c) the secrets file exists and the chosen
+  webhook is usable; (d) the wake + LaunchAgent are actually registered; (e) the
+  Mac is on AC power (a 9h caffeinate on battery is rough).
+- **Verify `set` took:** after scheduling, parse `pmset -g sched` + `launchctl
+  list` and confirm the repeating wake and the agent really registered (fail loud
+  if not).
+- **Log rotation:** `~/Library/Logs/alibi-to-5.log` grows unbounded over months;
+  cap it (size- or age-based).
+- **Open Qs:** how to test the Accessibility grant reliably and non-interactively
+  (nudge then read cursor position back via `cliclick p:` and compare?)? Is
+  `doctor` a standalone subcommand, or does `set` run the preflight automatically?
+  How to test webhook reachability without spamming the channel (a one-off "test"
+  post? Slack has no silent ping)? Log-rotation mechanism — in-script truncation
+  vs `newsyslog.d` vs `logrotate`-style?
+
+## 6. More realism — further humanize the footprint
+Extend the humanization beyond the lunch gap and per-nudge jitter.
+- **Holiday / skip-dates awareness:** don't look "active" on company holidays or
+  PTO — a mid-week, all-day-active machine on a holiday is a red flag.
+- **Random micro-breaks:** occasional short "Away" periods sprinkled through the
+  day (coffee/bathroom breaks), beyond the single lunch gap.
+- **Wake-time jitter:** vary the wake by ±N minutes so it isn't the identical
+  minute every day.
+- **Open Qs:** holidays — a manual skip-dates list in config, or pull from a
+  calendar/API? On a skip day, don't run at all, or run but deliberately stay
+  Away? Micro-breaks — frequency and length ranges (keep each under the away-
+  detection window so they read as normal, not disconnected)? Wake-time jitter —
+  `pmset repeat wake` is a single fixed time, so jitter means the routine must
+  compute and re-arm the *next* day's wake on each run, which breaks the current
+  "set once" model; decide whether that's worth it vs. jittering only the activity
+  start (already done) and leaving the hardware wake fixed.
 
 ## 2. Microsoft Teams support — DONE (2026-07-01)
 Shipped as the `--teams` / `--no-teams` toggle (`ENABLE_TEAMS`, default off):

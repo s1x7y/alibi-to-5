@@ -401,6 +401,13 @@ write_plist() {
 <dict>
     <key>Label</key>
     <string>$PLIST_LABEL</string>
+    <!-- run() backgrounds the long-lived work (caffeinate, the jiggle loop) and
+         the CLI usage-window pings, then exits fast. Without this, launchd
+         flushes the job's process group on that exit and kills every
+         backgrounded child (machine sleeps, you show Away, the codex/claude
+         ping never completes). Opt out so the children outlive run(). -->
+    <key>AbandonProcessGroup</key>
+    <true/>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>

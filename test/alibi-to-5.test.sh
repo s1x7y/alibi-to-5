@@ -138,6 +138,23 @@ check "roundtrip: until"        16:30 "$FEAT_UNTIL"
 check "roundtrip: lunch start"  12:45 "$FEAT_LUNCH_START"
 check "roundtrip: lunch length" 50    "$FEAT_LUNCH_MIN"
 
+# ---- write_plist: launchd survival + shape --------------------------------
+# The agent backgrounds long-lived work (caffeinate, the jiggle loop) and the
+# CLI pings, then run() exits. Without AbandonProcessGroup launchd flushes the
+# job's process group on that exit and kills every backgrounded child, so the
+# machine sleeps, you go Away, and the codex/claude usage-window ping never
+# lands. The plist MUST opt out of the process-group flush.
+PLIST_PATH="$(mktemp)"
+write_plist 9 30 --slack --no-teams --codex
+grep -q '<key>AbandonProcessGroup</key>' "$PLIST_PATH" && wp=y || wp=n
+check "write_plist: sets AbandonProcessGroup key" y "$wp"
+# the key must actually be true (a <false/> would still kill the children)
+awk '/<key>AbandonProcessGroup<\/key>/{getline; print}' "$PLIST_PATH" | grep -q '<true/>' && wp=y || wp=n
+check "write_plist: AbandonProcessGroup is true" y "$wp"
+grep -q '<string>run</string>' "$PLIST_PATH" && wp=y || wp=n
+check "write_plist: still invokes run" y "$wp"
+rm -f "$PLIST_PATH"
+
 # ---- summary --------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
