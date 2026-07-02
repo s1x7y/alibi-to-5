@@ -4,6 +4,13 @@
 
 # alibi-to-5
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white" alt="Platform: macOS">
+  <img src="https://img.shields.io/badge/made%20with-bash-1f425f.svg?logo=gnubash&logoColor=white" alt="Made with Bash">
+  <img src="https://img.shields.io/badge/status-always%20online-brightgreen" alt="Status: always online">
+</p>
+
 *Your Mac clocks in so you can catch the tide.*
 
 Built by a surfer. Good waves don't check whether standup is at 9 — some mornings
@@ -103,6 +110,18 @@ chmod 600 ~/.config/alibi-to-5/secrets
 Missing file or URL → the greeting is skipped and the rest of the wake runs fine.
 (Teams is retiring classic incoming webhooks in favor of Workflows, which want an
 Adaptive Card payload — a plain-text post may not render there.)
+
+## Use responsibly
+
+alibi-to-5 nudges *your own* mouse on *your own* Mac. It doesn't bypass security,
+touch your employer's systems, or exfiltrate anything. It's for people who deliver
+their work and would rather presence indicators reflect that than a 9-o'clock green
+dot. Check your organization's acceptable-use policy, and don't use it to bill
+hours you didn't work or dodge real obligations — how you use it is on you.
+
+## License
+
+[MIT](LICENSE).
 
 ## Notes
 

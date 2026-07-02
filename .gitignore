@@ -3,6 +3,7 @@
 
 # Internal design/brainstorm docs (kept locally, not published)
 docs/superpowers/
+BACKLOG.md
 
 # Logs (the routine writes to ~/Library/Logs, but ignore any stray local logs)
 *.log
