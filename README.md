@@ -1,324 +1,103 @@
 # alibi-to-5
 
-*Your nine-to-five alibi.* Wake your Mac on weekdays at a time you choose, and on wake automatically keep
-it awake, **keep your status "active" in Slack/Teams** (via a real mouse
-jiggle), open your apps, start Codex/Claude usage windows, and optionally post a
-good-morning message — all from **one script**.
+*Your Mac clocks in so you don't have to.*
 
-It's for people who deliver their work on a **shifted schedule** and just need
-presence monitoring not to flag the difference. So the activity is built to look
-**human, not robotic**: randomized nudge cadence and distance, a random morning
-start, an optional **lunch gap** and short random **micro-breaks** where you
-naturally show "Away", a real **end-of-day**, automatic **holiday/PTO skipping**,
-and on-demand **`pause`/`resume`** for breaks.
+One script that wakes your Mac on weekdays and, on wake, keeps it awake, keeps
+your Slack/Teams status green (via a real mouse jiggle), opens your apps, starts
+your Codex/Claude usage windows, and optionally posts a good-morning message. It
+also takes a jittered lunch, sprinkles in short coffee breaks, and skips public
+holidays — because a machine that's active nine hours straight, 365 days a year,
+fools nobody.
+
+For people who deliver on a shifted schedule and just need presence monitoring to
+mind its own business.
+
+## Run it
 
 ```
-alibi-to-5.sh set 07:45      # arm it once
+brew bundle                 # installs cliclick
+chmod +x alibi-to-5.sh
+./alibi-to-5.sh set 07:45   # arm it (asks for your admin password, for pmset)
 ```
 
-That's the only command you normally type. macOS handles the rest every weekday.
+That's the only command you type. Put the Mac to **sleep** (not shut down) and
+macOS runs the routine every weekday. Two one-time macOS settings:
 
-Every integration is an independent **toggle** — a config default at the top of
-the script, plus a `--flag` / `--no-flag` you can pass to `set`. Defaults keep
-Slack and the Codex ping on, Teams and Claude off, and no greeting, so a bare
-`set 07:45` behaves exactly as before.
-
-## Why a mouse jiggle?
-
-Keeping the Mac *awake* (with `caffeinate`) is **not** enough to stay "active"
-in Slack or Teams. Those apps mark you **Away** based on **OS idle time** — the
-number of seconds since your last real mouse/keyboard (HID) event. `caffeinate`
-generates no input, so the idle timer keeps climbing and you still go Away.
-
-The only thing that resets it is an actual input event. So the routine uses
-[`cliclick`](https://github.com/BlueM/cliclick) to nudge the cursor a few pixels
-and move it straight back on a short interval. Two facts worth knowing:
-
-- **Distance doesn't matter.** Any HID event resets the idle timer to zero, so a
-  3px nudge works exactly like a 300px one. The cursor returns to where it was.
-- **Cadence matters.** The nudge must fire more often than the Away threshold —
-  Teams flips to Away after ~5 min, Slack after ~10 min.
-
-To avoid a metronome-like footprint, both are **randomized per nudge**: a random
-distance (default **1–8px**, random axis/direction) at a random interval
-(default **45–120s**, comfortably under both Away thresholds). The ranges are
-editable (`JIGGLE_MIN_PIXELS`/`JIGGLE_MAX_PIXELS`,
-`JIGGLE_MIN_SECONDS`/`JIGGLE_MAX_SECONDS`) at the top of the script.
+- **Lock Screen → require password: Never**, so wake-from-sleep skips the login
+  screen (FileVault stays on; auto-login can't).
+- **Accessibility** grant for your terminal (Privacy & Security → Accessibility),
+  or the jiggle silently no-ops and you go Away anyway. Run
+  `./alibi-to-5.sh doctor` to confirm it actually moves the cursor.
 
 ## Commands
 
 | Command | What it does |
 |---------|--------------|
-| `alibi-to-5.sh set [HH:MM] [flags]` | **Arm it:** schedule the Mon–Fri wake and install the LaunchAgent. Prompts for the time if you omit it. Re-run to change the time or flags. |
-| `alibi-to-5.sh unset` | **Disarm it:** cancel the schedule and remove the agent. |
-| `alibi-to-5.sh test [flags]` | Run the wake routine right now (with the given flags), then print the recent log. |
-| `alibi-to-5.sh doctor [flags]` | **Preflight:** check the Accessibility grant actually moves the cursor, the enabled CLIs resolve, the webhook is configured, the wake/agent are armed, and you're on AC power. `set` runs this automatically. |
-| `alibi-to-5.sh pause [DURATION]` | **Take a break:** stop looking active now (you go "Away"). No `DURATION` = until `resume`; else `30m` / `1h` / `90s` / a plain number of minutes. |
-| `alibi-to-5.sh resume` | End a pause and pick activity back up. |
-| `alibi-to-5.sh status` | Show the schedule, agent state, today's window/lunch, pause state, and recent log. |
-| `alibi-to-5.sh help` | Usage. |
+| `set [HH:MM] [flags]` | Arm the weekday wake + routine. Prompts for the time if omitted. Re-run to change it. |
+| `unset` | Cancel the schedule and stop a running routine. |
+| `test [flags]` | Run the routine right now. |
+| `doctor [flags]` | Preflight: Accessibility, CLIs, webhook, schedule, power. `set` runs it too. |
+| `pause [DURATION]` / `resume` | Go Away for a bit (`30m` / `1h` / `90s`, or until `resume`), then come back. |
+| `status` | Show the schedule, today's window/lunch/breaks, and recent log. |
+| `help` | Usage. |
 
-You only ever type `set` (and later `unset`), plus `pause`/`resume` when you want
-a break. When the Mac wakes, macOS calls the script back internally to run the
-routine — you never invoke that yourself.
+## Flags
 
-## Feature flags
+Pass to `set` (or `test`). Each is baked into the schedule, so it sticks on every
+wake. Defaults are plain constants at the top of the script.
 
-Pass these to `set` (or `test`). Each overrides its config default, and the
-resolved choice is **baked into the LaunchAgent**, so it applies on every wake
-without editing the script:
-
-| Flag | Effect | Default |
-|------|--------|---------|
-| `--slack` / `--no-slack` | Open `Slack.app` on wake | on |
-| `--teams` / `--no-teams` | Open `Microsoft Teams.app` on wake | off |
-| `--codex` / `--no-codex` | Ping the Codex CLI to start its usage window | on |
-| `--claude` / `--no-claude` | Ping the Claude CLI to start its usage window | off |
-| `--good-morning "TEXT"` | Post `TEXT` to a Slack/Teams webhook after apps open | off |
+| Flag | What it does | Default |
+|------|--------------|---------|
+| `--slack` / `--no-slack` | Open Slack | on |
+| `--teams` / `--no-teams` | Open Microsoft Teams | off |
+| `--codex` / `--no-codex` | Ping the Codex CLI usage window | on |
+| `--claude` / `--no-claude` | Ping the Claude CLI usage window | off |
+| `--until HH:MM` | End the active day at this time | ~9h |
+| `--lunch HH:MM[/MIN]` / `--no-lunch` | Idle lunch gap, `MIN` min long, jittered daily | off |
+| `--holidays` / `--no-holidays` | Skip public-holiday / PTO days entirely | on |
+| `--country CC` | ISO-3166 country for the holiday lookup (e.g. `US`, `PT`) | — |
+| `--good-morning "TEXT"` | Post `TEXT` to a webhook after apps open (`{time}` / `{date}` / `{day}` tokens) | off |
 | `--gm-platform slack\|teams` | Which webhook the greeting uses | slack |
-| `--until HH:MM` | End the active window at this time (else ~9h duration) | off |
-| `--lunch HH:MM[/MIN]` | Idle lunch gap, `MIN` minutes long (default 45), jittered daily | off |
-| `--no-lunch` | Disable the lunch gap | — |
-| `--holidays` / `--no-holidays` | Skip public-holiday / PTO days entirely (needs a country) | on |
-| `--country CC` | ISO-3166 country (e.g. `US`, `PT`) for the holiday lookup | config `COUNTRY_CODE` |
 
 ```
-alibi-to-5.sh set 09:40 --teams --claude --until 17:00 --lunch 13:00 \
+./alibi-to-5.sh set 09:40 --teams --until 17:00 --lunch 13:00 --country PT \
               --good-morning "Online {day} {time}"
 ```
 
-The greeting text supports `{time}`, `{date}`, and `{day}` tokens, filled in at
-wake. Prefer editing the defaults instead? They're plain constants
-(`ENABLE_SLACK`, `ENABLE_TEAMS`, `ENABLE_CODEX`, `ENABLE_CLAUDE`,
-`GOOD_MORNING_TEXT`, `GOOD_MORNING_PLATFORM`) at the top of the script.
+Finer knobs (jiggle cadence/distance, start jitter, micro-break count/length,
+`EXTRA_SKIP_DATES` for PTO, log-size cap) are constants at the top of the script.
 
-## Good-morning message
+## Why the mouse jiggle
 
-When a greeting is configured, the routine POSTs it to a **Slack or Teams
-incoming webhook** after your apps open. The webhook URL is a secret, so it
-lives **outside the repo** in `~/.config/alibi-to-5/secrets` — a shell file that
-the routine sources at wake:
+`caffeinate` keeps the Mac awake but generates no input, and Slack/Teams mark you
+Away on **OS idle time** (seconds since your last HID event). Only a real event
+resets it. So `cliclick` nudges the cursor a few pixels and back, more often than
+the Away threshold (Teams ~5 min, Slack ~10 min). Distance is irrelevant; cadence
+is everything. Both are randomized so it isn't a metronome.
+
+## Looking human
+
+Nothing fires like clockwork: randomized nudge timing/distance, a 0–10 min morning
+start drift, a jittered lunch, and a few short "away" micro-breaks. On holidays and
+PTO dates it doesn't run at all. Any app or CLI that isn't installed is skipped
+with a log line, never a crash.
+
+## Good-morning webhook
+
+Needs a URL kept out of the repo:
 
 ```
-mkdir -p ~/.config/alibi-to-5
-cp secrets.example ~/.config/alibi-to-5/secrets   # then edit in your real URL(s)
+cp secrets.example ~/.config/alibi-to-5/secrets   # then add your Slack/Teams webhook URL
 chmod 600 ~/.config/alibi-to-5/secrets
 ```
 
-```sh
-# ~/.config/alibi-to-5/secrets
-SLACK_WEBHOOK_URL="https://hooks.slack.com/services/XXX/YYY/ZZZ"
-# TEAMS_WEBHOOK_URL="https://…/IncomingWebhook/…"
-```
-
-If the file or the relevant URL is missing, the greeting is skipped with a
-logged warning — the rest of the wake routine is never blocked by it.
-
-> **Slack:** create an [Incoming Webhook](https://api.slack.com/messaging/webhooks)
-> for the channel you want; it posts a simple `{"text": …}` payload.
->
-> **Teams:** classic Office 365 *Incoming Webhook* connectors accept the same
-> `{"text": …}` payload, but Microsoft is retiring them in favor of **Workflows**,
-> which expect an Adaptive Card payload instead. If you use a Workflows URL, a
-> plain-text post may not render — check Teams' current webhook docs.
-
-## Looking human: workday shape & breaks
-
-A perfectly regular signal — same wake minute, same nudge every 60s, active for
-exactly 9h straight — is itself a tell. So beyond the randomized nudges, the
-routine shapes itself like a real workday:
-
-- **Random morning start.** `caffeinate` starts immediately (so the Mac doesn't
-  re-sleep), but the visible activity waits a random **0–10 min**
-  (`START_JITTER_MAX_SECONDS`), so your "came online" time drifts day to day.
-- **End of day.** `--until 17:00` (config `WORK_END`) ends the active window at a
-  real time; otherwise it falls back to the ~9h duration.
-- **Lunch gap.** `--lunch 13:00` (optionally `13:00/45` for length; config
-  `LUNCH_START` / `LUNCH_MINUTES`) makes the jiggle **pause** mid-day, with a few
-  minutes of random jitter on the start and length each day. During lunch your
-  idle timer climbs and you show **Away** — like a real person — then you resume.
-  `--no-lunch` turns it off.
-- **Micro-breaks.** Beyond lunch, the routine sprinkles a few short **Away**
-  gaps through the day (coffee/bathroom): up to **3** per day
-  (`MICROBREAK_MAX_COUNT`), each a random **4–12 min**
-  (`MICROBREAK_MIN_MINUTES` / `MICROBREAK_MAX_MINUTES`) — deliberately kept under
-  the Slack Away threshold so they read as brief natural gaps, not a disconnect.
-  They're placed in non-overlapping slots that avoid the lunch gap, re-rolled each
-  day, and shown by `status`.
-
-### Skipping holidays & PTO
-
-An all-day-active machine on a public holiday is a red flag. When
-`ENABLE_HOLIDAY_SKIP` is on (the default; `--no-holidays` disables it per
-schedule) and you set your country — either **`--country PT`** on `set` or the
-`COUNTRY_CODE` constant (ISO-3166 alpha-2, e.g. `US`, `PT`) — the routine looks up
-public holidays from the free [Nager.Date](https://date.nager.at) API, caches them
-per year under `~/.config/alibi-to-5/`, and on a holiday **doesn't run at all** —
-the Mac just goes back to sleep and you look genuinely offline. Add your own PTO /
-one-off dates to `EXTRA_SKIP_DATES` (a list of `YYYY-MM-DD`) since a public-holiday
-API can't know those.
-
-```
-alibi-to-5.sh set 09:00 --country PT     # skip Portuguese public holidays
-```
-
-It's **fail-open**: if the country isn't set, the network is down, or the lookup
-fails, the routine runs normally — a false skip (looking offline on a real
-workday) is the exact failure this tool exists to prevent.
-
-### Taking a break
-
-Step away whenever you want, without tearing anything down:
-
-```
-alibi-to-5.sh pause 30m     # go "Away" for 30 minutes, then auto-resume
-alibi-to-5.sh pause         # go "Away" until you come back
-alibi-to-5.sh resume        # ...come back now
-```
-
-`pause` just stops the jiggle so your status naturally goes Away; the running
-routine notices within ~30s (`PAUSE_POLL_SECONDS`). `status` shows whether you're
-paused and until when. A pause never carries into the next day — each wake starts
-fresh.
-
-## How it works
-
-1. `set 07:45` runs `pmset repeat wake MTWRF 07:45:00` so macOS **wakes the Mac**
-   every weekday at that time, and installs a **LaunchAgent** that runs the wake
-   routine on each of those wakes.
-2. The wake routine (each step gated by its toggle):
-   - **Holiday/PTO check first.** If today is a public holiday (for your
-     `COUNTRY_CODE`) or an `EXTRA_SKIP_DATES` entry, the routine logs the skip and
-     exits before anything else — the Mac goes back to sleep. (Fail-open: any
-     lookup trouble falls through to a normal run.)
-   - **`caffeinate`** holds the Mac awake until the window end (`--until`, else
-     ~9h) so the session stays alive.
-   - After a **random start delay**, the **activity loop** begins: each cycle,
-     if you're not at lunch, not in a micro-break, and not paused, it does one
-     randomized `cliclick` nudge and waits a random interval; otherwise it lets
-     you show Away.
-   - **Opens the enabled apps** — Slack and/or Teams (per toggle), plus anything
-     you add to `OPEN_APPS`.
-   - **Pings Codex** — `codex exec --sandbox read-only "are you there"` to start
-     its usage window. Read-only, so it just returns text.
-   - **Pings Claude** — `claude -p "are you there"` (headless) to start its usage
-     window, when `--claude` is enabled.
-   - **Posts the good-morning message** to a webhook, when configured.
-
-   Any CLI/app that isn't installed is skipped with a logged warning — a missing
-   piece never blocks the rest of the routine.
-3. `unset` cancels the wake, removes the agent, and stops a running routine.
-
-Logs go to `~/Library/Logs/alibi-to-5.log`, rotated to a single `.log.1` backup
-once they pass `LOG_MAX_BYTES` (~5 MB) so they can't grow unbounded.
-
-## Preflight: `doctor`
-
-Several failures are otherwise **silent** — most importantly, `cliclick` quietly
-no-ops without an Accessibility grant, so the jiggle "runs" but the cursor never
-moves and you still go Away. `alibi-to-5.sh doctor` catches these before a real
-wake by actually **moving the cursor and reading it back** (the only real proof
-the grant works), plus checking that the enabled CLIs resolve, the webhook is
-configured, the wake + LaunchAgent are armed, and you're on AC power. `set` runs
-the same checks automatically (as warnings — they never block scheduling). It
-prints `OK` / `WARN` / `FAIL` lines and exits non-zero if a hard check fails.
-
-## Requirements
-
-- **macOS** (uses `pmset`, `caffeinate`, `launchctl`, `open`).
-- **[`cliclick`](https://github.com/BlueM/cliclick)** for the mouse jiggle.
-- *(optional)* the **Codex CLI** and/or **Claude CLI** for the usage-window pings.
-- *(optional)* a **Slack/Teams incoming webhook URL** for the good-morning
-  message (`curl` ships with macOS).
-
-Install the dependencies with [Homebrew](https://brew.sh):
-
-```
-brew bundle      # reads the Brewfile in this folder; installs cliclick
-```
-
-> **Accessibility permission:** macOS may require a one-time **Accessibility**
-> grant before synthetic mouse events take effect (System Settings → Privacy &
-> Security → Accessibility). Because the jiggle runs under a LaunchAgent, if you
-> notice the cursor isn't moving on wake, grant Accessibility to the controlling
-> process and re-run `set`.
-
-## Setup
-
-1. **Install dependencies:** `brew bundle`
-2. **Make the script executable:** `chmod +x alibi-to-5.sh`
-3. **Arm it:** `./alibi-to-5.sh set 07:45` (asks for your admin password, for
-   `pmset`).
-4. **Get past the lock screen while keeping FileVault on.** FileVault only asks
-   for a password at a full power-on. On **wake from sleep** the disk is already
-   unlocked, so you only face the normal lock screen. To pass it:
-   - Keep the Mac **asleep, not shut down**.
-   - System Settings → **Lock Screen** → "Require password after screen saver
-     begins or display is turned off" → **Never**.
-
-   (FileVault and automatic login can't both be on — macOS blocks it — so use
-   this sleep route rather than auto-login.)
-
-## Daily use
-
-Just put the Mac to **sleep** (Apple menu → Sleep, or close the lid) — don't
-shut it down. On the next weekday wake, the routine handles the mouse jiggle and
-opens your apps automatically. No manual toggling needed.
-
-## Test it now (no waiting)
-
-```
-./alibi-to-5.sh test
-```
-
-This runs the real routine immediately (so it starts the ~9h caffeinate + the
-jiggle loop) and prints the log. Your apps should open and the cursor should
-jiggle. To stop the lingering caffeinate/jiggle from a test, log out/in or
-`pkill caffeinate` / `pkill cliclick`.
-
-## Change the time
-
-Re-run `./alibi-to-5.sh set 08:15`.
-
-## Remove everything
-
-```
-./alibi-to-5.sh unset
-```
-
-(Lock Screen / FileVault settings you changed by hand must be reverted manually
-in System Settings.)
+Missing file or URL → the greeting is skipped and the rest of the wake runs fine.
+(Teams is retiring classic incoming webhooks in favor of Workflows, which want an
+Adaptive Card payload — a plain-text post may not render there.)
 
 ## Notes
 
-- Wake uses `pmset repeat wake MTWRF HH:MM`; check it with `pmset -g sched`.
-  Because it's a *wake* (not a power-on), the Mac must be **asleep** — not shut
-  down — at that time. Laptops should be plugged in.
-- The LaunchAgent uses `StartCalendarInterval` (Mon–Fri at the wake time), so it
-  fires on wake-from-sleep even while you're already logged in.
-- All tunables (wake days, fallback duration, log-size cap, jiggle
-  cadence/distance ranges, start-jitter, pause poll interval, workday end + lunch
-  start/length/jitter, micro-break count/length, holiday `COUNTRY_CODE` +
-  `EXTRA_SKIP_DATES`, the feature toggles, the extra app list, the Codex/Claude
-  prompts, the greeting and its platform, the secrets path) are plain constants at
-  the top of `alibi-to-5.sh`.
-- Feature choices are stored **in the LaunchAgent** (as the arguments it passes
-  to `run`), not in a separate state file — so the schedule keeps its flags even
-  if you later change the config defaults. Re-run `set` to change them.
-
-## Roadmap
-
-- **Linux support.** Today the script is macOS-only. A Linux port maps each piece
-  to an equivalent, with Wayland the hard case for synthetic input:
-
-  | Piece | macOS | Linux equivalent |
-  |-------|-------|------------------|
-  | Wake scheduling | `pmset repeat wake` | `rtcwake` / `/sys/class/rtc/rtc0/wakealarm` (a single alarm — a cron/systemd job must re-arm the next weekday's wake) |
-  | Scheduler / agent | `launchd` plist | `systemd --user` timer or `cron` |
-  | Keep awake | `caffeinate` | `systemd-inhibit` / `caffeine` / GNOME inhibitor |
-  | Mouse jiggle | `cliclick` | `xdotool` (X11) or `ydotool` (Wayland) |
-  | Open apps | `open -a` | `xdg-open` / direct binary launch |
-
-  Open questions: X11 only or Wayland too; one cross-platform script with an OS
-  switch vs. `alibi-to-5-macos.sh` / `alibi-to-5-linux.sh`; and the distro/init
-  assumptions (systemd-only?).
+- macOS only (`pmset` / `caffeinate` / `launchctl` / `open`). Laptops should be
+  plugged in. Logs go to `~/Library/Logs/alibi-to-5.log` (rotated at ~5 MB).
+- **Linux** is on the roadmap — the mapping (`rtcwake`, `systemd`/`cron`,
+  `systemd-inhibit`, `xdotool`/`ydotool`) lives in `BACKLOG.md`.
