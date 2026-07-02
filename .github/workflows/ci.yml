@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint with shellcheck
+        run: shellcheck --severity=warning alibi-to-5.sh test/alibi-to-5.test.sh
+
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run test suite
+        run: bash test/alibi-to-5.test.sh
