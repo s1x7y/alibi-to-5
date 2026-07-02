@@ -79,7 +79,8 @@ without editing the script:
 | `--until HH:MM` | End the active window at this time (else ~9h duration) | off |
 | `--lunch HH:MM[/MIN]` | Idle lunch gap, `MIN` minutes long (default 45), jittered daily | off |
 | `--no-lunch` | Disable the lunch gap | — |
-| `--holidays` / `--no-holidays` | Skip public-holiday / PTO days entirely (needs `COUNTRY_CODE`) | on |
+| `--holidays` / `--no-holidays` | Skip public-holiday / PTO days entirely (needs a country) | on |
+| `--country CC` | ISO-3166 country (e.g. `US`, `PT`) for the holiday lookup | config `COUNTRY_CODE` |
 
 ```
 alibi-to-5.sh set 09:40 --teams --claude --until 17:00 --lunch 13:00 \
@@ -149,12 +150,17 @@ routine shapes itself like a real workday:
 
 An all-day-active machine on a public holiday is a red flag. When
 `ENABLE_HOLIDAY_SKIP` is on (the default; `--no-holidays` disables it per
-schedule) and you set your `COUNTRY_CODE` (ISO-3166 alpha-2, e.g. `US`, `PT`), the
-routine looks up public holidays from the free [Nager.Date](https://date.nager.at)
-API, caches them per year under `~/.config/alibi-to-5/`, and on a holiday **doesn't
-run at all** — the Mac just goes back to sleep and you look genuinely offline. Add
-your own PTO / one-off dates to `EXTRA_SKIP_DATES` (a list of `YYYY-MM-DD`) since a
-public-holiday API can't know those.
+schedule) and you set your country — either **`--country PT`** on `set` or the
+`COUNTRY_CODE` constant (ISO-3166 alpha-2, e.g. `US`, `PT`) — the routine looks up
+public holidays from the free [Nager.Date](https://date.nager.at) API, caches them
+per year under `~/.config/alibi-to-5/`, and on a holiday **doesn't run at all** —
+the Mac just goes back to sleep and you look genuinely offline. Add your own PTO /
+one-off dates to `EXTRA_SKIP_DATES` (a list of `YYYY-MM-DD`) since a public-holiday
+API can't know those.
+
+```
+alibi-to-5.sh set 09:00 --country PT     # skip Portuguese public holidays
+```
 
 It's **fail-open**: if the country isn't set, the network is down, or the lookup
 fails, the routine runs normally — a false skip (looking offline on a real

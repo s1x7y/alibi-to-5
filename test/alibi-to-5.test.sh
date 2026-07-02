@@ -152,6 +152,22 @@ check "holidays: canonical emits --no-holidays" y "$hz"
 parse_feature_flags "${CANON[@]}"
 check "holidays: round-trip off" 0 "$FEAT_HOLIDAYS"
 
+# ---- country flag: parse, default, canonical round-trip -------------------
+parse_feature_flags
+check "country: default matches config" "$COUNTRY_CODE" "$FEAT_COUNTRY"
+parse_feature_flags --country PT
+check "country: --country sets code" PT "$FEAT_COUNTRY"
+# canonical emits --country when set, and round-trips
+parse_feature_flags --country US; build_canonical_flags
+case " ${CANON[*]} " in *" --country US "*) cf=y ;; *) cf=n ;; esac
+check "country: canonical emits --country US" y "$cf"
+parse_feature_flags "${CANON[@]}"
+check "country: round-trip" US "$FEAT_COUNTRY"
+# empty country emits no --country flag (holiday lookup simply disabled)
+parse_feature_flags --country ''; build_canonical_flags
+case " ${CANON[*]} " in *" --country "*) cf=y ;; *) cf=n ;; esac
+check "country: canonical omits --country when empty" n "$cf"
+
 # ---- resolve_schedule: micro-break placement invariants -------------------
 # Nondeterministic (like the lunch jitter), so assert the invariants that must
 # ALWAYS hold across many rolls: parallel arrays stay in step, count <= max,

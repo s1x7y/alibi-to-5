@@ -327,6 +327,7 @@ parse_feature_flags() {
   FEAT_LUNCH_START=$LUNCH_START
   FEAT_LUNCH_MIN=$LUNCH_MINUTES
   FEAT_HOLIDAYS=$ENABLE_HOLIDAY_SKIP
+  FEAT_COUNTRY=$COUNTRY_CODE
   local l
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -348,6 +349,7 @@ parse_feature_flags() {
       --no-lunch)        FEAT_LUNCH_START="" ;;
       --holidays)        FEAT_HOLIDAYS=1 ;;
       --no-holidays)     FEAT_HOLIDAYS=0 ;;
+      --country)         shift; FEAT_COUNTRY=${1:-} ;;
     esac
     shift
   done
@@ -373,6 +375,7 @@ build_canonical_flags() {
     CANON+=(--no-lunch)
   fi
   [ "$FEAT_HOLIDAYS" = 1 ] && CANON+=(--holidays) || CANON+=(--no-holidays)
+  [ -n "$FEAT_COUNTRY" ] && CANON+=(--country "$FEAT_COUNTRY")
 }
 
 # POST plain text to an incoming webhook. curl -f makes a 4xx/5xx a failure we
@@ -425,16 +428,17 @@ rotate_log() {
 holiday_cache_file() { echo "$HOLIDAY_CACHE_DIR/holidays-$(date +%Y).json"; }
 
 # Ensure this year's public-holiday cache exists, fetching it once from the
-# Nager.Date API for COUNTRY_CODE. Best-effort and FAIL-OPEN: no country set, no
+# Nager.Date API for the resolved country (the --country flag / FEAT_COUNTRY, else
+# the COUNTRY_CODE config default). Best-effort and FAIL-OPEN: no country set, no
 # network, or a bad/empty response leaves the cache absent and returns non-zero,
 # so the caller falls back to running (never a false skip).
 ensure_holiday_cache() {
-  local year cache
-  [ -n "$COUNTRY_CODE" ] || return 1
+  local year cache country=${FEAT_COUNTRY:-$COUNTRY_CODE}
+  [ -n "$country" ] || return 1
   year=$(date +%Y); cache="$HOLIDAY_CACHE_DIR/holidays-$year.json"
   [ -s "$cache" ] && return 0
   mkdir -p "$HOLIDAY_CACHE_DIR"
-  if curl -fsS "https://date.nager.at/api/v3/PublicHolidays/$year/$COUNTRY_CODE" -o "$cache" 2>>"$LOG" \
+  if curl -fsS "https://date.nager.at/api/v3/PublicHolidays/$year/$country" -o "$cache" 2>>"$LOG" \
      && [ -s "$cache" ]; then
     return 0
   fi
@@ -511,7 +515,9 @@ baked into the agent, so it applies on every wake):
   --lunch HH:MM[/MIN]         Idle lunch gap (default 45m), jittered daily.
   --no-lunch                  Disable the lunch gap.
   --holidays / --no-holidays  Skip public-holiday/PTO days entirely (default: on).
-                              Needs COUNTRY_CODE set; PTO via EXTRA_SKIP_DATES.
+                              Needs a country set; PTO via EXTRA_SKIP_DATES.
+  --country CC                ISO-3166 country (e.g. US, PT) for the holiday
+                              lookup (default: COUNTRY_CODE; empty = no lookup).
 
 Example:
   alibi-to-5.sh set 09:40 --teams --until 17:00 --lunch 13:00 \
@@ -865,9 +871,9 @@ cmd_doctor() {
   else say "WARN  on battery -- a full-day caffeinate will drain it."; fi
 
   # (f) Holiday lookup reachable, when enabled.
-  if [ "$FEAT_HOLIDAYS" = 1 ] && [ -n "$COUNTRY_CODE" ]; then
-    if ensure_holiday_cache; then say "OK    holiday list cached for $COUNTRY_CODE ($(date +%Y))."
-    else say "WARN  holiday lookup for $COUNTRY_CODE unavailable (fail-open: still runs)."; fi
+  if [ "$FEAT_HOLIDAYS" = 1 ] && [ -n "$FEAT_COUNTRY" ]; then
+    if ensure_holiday_cache; then say "OK    holiday list cached for $FEAT_COUNTRY ($(date +%Y))."
+    else say "WARN  holiday lookup for $FEAT_COUNTRY unavailable (fail-open: still runs)."; fi
   fi
 
   say
