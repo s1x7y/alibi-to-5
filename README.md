@@ -124,6 +124,18 @@ hours you didn't work or dodge real obligations — how you use it is on you.
 
 [MIT](LICENSE).
 
+## Acknowledgments
+
+alibi-to-5 builds on tools it doesn't bundle — you install them separately:
+
+- **[cliclick](https://github.com/BlueM/cliclick)** by Carsten Blüm (BSD-3-Clause) —
+  the scriptable cursor movement behind the jiggle.
+- **[Nager.Date](https://date.nager.at)** — the public-holiday API used to skip
+  holidays (one cached lookup per country per year).
+
+It also leans on macOS built-ins (`caffeinate`, `pmset`, `launchctl`, `open`, `curl`)
+and, optionally, the Codex and Claude CLIs.
+
 ## Notes
 
 - macOS only (`pmset` / `caffeinate` / `launchctl` / `open`). Laptops should be
