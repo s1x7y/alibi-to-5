@@ -1,0 +1,4 @@
+# The Brewfile is Ruby-ish syntax that GitHub's Linguist detects as Ruby, which
+# makes CodeQL's default setup try (and fail) to analyze a non-existent Ruby
+# codebase. It isn't a source language here, so exclude it from detection.
+Brewfile linguist-detectable=false
