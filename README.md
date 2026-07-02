@@ -8,8 +8,9 @@ good-morning message — all from **one script**.
 It's for people who deliver their work on a **shifted schedule** and just need
 presence monitoring not to flag the difference. So the activity is built to look
 **human, not robotic**: randomized nudge cadence and distance, a random morning
-start, an optional **lunch gap** where you naturally show "Away", a real
-**end-of-day**, and on-demand **`pause`/`resume`** for breaks.
+start, an optional **lunch gap** and short random **micro-breaks** where you
+naturally show "Away", a real **end-of-day**, automatic **holiday/PTO skipping**,
+and on-demand **`pause`/`resume`** for breaks.
 
 ```
 alibi-to-5.sh set 07:45      # arm it once
@@ -51,6 +52,7 @@ editable (`JIGGLE_MIN_PIXELS`/`JIGGLE_MAX_PIXELS`,
 | `alibi-to-5.sh set [HH:MM] [flags]` | **Arm it:** schedule the Mon–Fri wake and install the LaunchAgent. Prompts for the time if you omit it. Re-run to change the time or flags. |
 | `alibi-to-5.sh unset` | **Disarm it:** cancel the schedule and remove the agent. |
 | `alibi-to-5.sh test [flags]` | Run the wake routine right now (with the given flags), then print the recent log. |
+| `alibi-to-5.sh doctor [flags]` | **Preflight:** check the Accessibility grant actually moves the cursor, the enabled CLIs resolve, the webhook is configured, the wake/agent are armed, and you're on AC power. `set` runs this automatically. |
 | `alibi-to-5.sh pause [DURATION]` | **Take a break:** stop looking active now (you go "Away"). No `DURATION` = until `resume`; else `30m` / `1h` / `90s` / a plain number of minutes. |
 | `alibi-to-5.sh resume` | End a pause and pick activity back up. |
 | `alibi-to-5.sh status` | Show the schedule, agent state, today's window/lunch, pause state, and recent log. |
@@ -77,6 +79,7 @@ without editing the script:
 | `--until HH:MM` | End the active window at this time (else ~9h duration) | off |
 | `--lunch HH:MM[/MIN]` | Idle lunch gap, `MIN` minutes long (default 45), jittered daily | off |
 | `--no-lunch` | Disable the lunch gap | — |
+| `--holidays` / `--no-holidays` | Skip public-holiday / PTO days entirely (needs `COUNTRY_CODE`) | on |
 
 ```
 alibi-to-5.sh set 09:40 --teams --claude --until 17:00 --lunch 13:00 \
@@ -134,6 +137,28 @@ routine shapes itself like a real workday:
   minutes of random jitter on the start and length each day. During lunch your
   idle timer climbs and you show **Away** — like a real person — then you resume.
   `--no-lunch` turns it off.
+- **Micro-breaks.** Beyond lunch, the routine sprinkles a few short **Away**
+  gaps through the day (coffee/bathroom): up to **3** per day
+  (`MICROBREAK_MAX_COUNT`), each a random **4–12 min**
+  (`MICROBREAK_MIN_MINUTES` / `MICROBREAK_MAX_MINUTES`) — deliberately kept under
+  the Slack Away threshold so they read as brief natural gaps, not a disconnect.
+  They're placed in non-overlapping slots that avoid the lunch gap, re-rolled each
+  day, and shown by `status`.
+
+### Skipping holidays & PTO
+
+An all-day-active machine on a public holiday is a red flag. When
+`ENABLE_HOLIDAY_SKIP` is on (the default; `--no-holidays` disables it per
+schedule) and you set your `COUNTRY_CODE` (ISO-3166 alpha-2, e.g. `US`, `PT`), the
+routine looks up public holidays from the free [Nager.Date](https://date.nager.at)
+API, caches them per year under `~/.config/alibi-to-5/`, and on a holiday **doesn't
+run at all** — the Mac just goes back to sleep and you look genuinely offline. Add
+your own PTO / one-off dates to `EXTRA_SKIP_DATES` (a list of `YYYY-MM-DD`) since a
+public-holiday API can't know those.
+
+It's **fail-open**: if the country isn't set, the network is down, or the lookup
+fails, the routine runs normally — a false skip (looking offline on a real
+workday) is the exact failure this tool exists to prevent.
 
 ### Taking a break
 
@@ -156,11 +181,16 @@ fresh.
    every weekday at that time, and installs a **LaunchAgent** that runs the wake
    routine on each of those wakes.
 2. The wake routine (each step gated by its toggle):
+   - **Holiday/PTO check first.** If today is a public holiday (for your
+     `COUNTRY_CODE`) or an `EXTRA_SKIP_DATES` entry, the routine logs the skip and
+     exits before anything else — the Mac goes back to sleep. (Fail-open: any
+     lookup trouble falls through to a normal run.)
    - **`caffeinate`** holds the Mac awake until the window end (`--until`, else
      ~9h) so the session stays alive.
    - After a **random start delay**, the **activity loop** begins: each cycle,
-     if you're not at lunch and not paused, it does one randomized `cliclick`
-     nudge and waits a random interval; otherwise it lets you show Away.
+     if you're not at lunch, not in a micro-break, and not paused, it does one
+     randomized `cliclick` nudge and waits a random interval; otherwise it lets
+     you show Away.
    - **Opens the enabled apps** — Slack and/or Teams (per toggle), plus anything
      you add to `OPEN_APPS`.
    - **Pings Codex** — `codex exec --sandbox read-only "are you there"` to start
@@ -173,7 +203,19 @@ fresh.
    piece never blocks the rest of the routine.
 3. `unset` cancels the wake, removes the agent, and stops a running routine.
 
-Logs go to `~/Library/Logs/alibi-to-5.log`.
+Logs go to `~/Library/Logs/alibi-to-5.log`, rotated to a single `.log.1` backup
+once they pass `LOG_MAX_BYTES` (~5 MB) so they can't grow unbounded.
+
+## Preflight: `doctor`
+
+Several failures are otherwise **silent** — most importantly, `cliclick` quietly
+no-ops without an Accessibility grant, so the jiggle "runs" but the cursor never
+moves and you still go Away. `alibi-to-5.sh doctor` catches these before a real
+wake by actually **moving the cursor and reading it back** (the only real proof
+the grant works), plus checking that the enabled CLIs resolve, the webhook is
+configured, the wake + LaunchAgent are armed, and you're on AC power. `set` runs
+the same checks automatically (as warnings — they never block scheduling). It
+prints `OK` / `WARN` / `FAIL` lines and exits non-zero if a hard check fails.
 
 ## Requirements
 
@@ -248,11 +290,29 @@ in System Settings.)
   down — at that time. Laptops should be plugged in.
 - The LaunchAgent uses `StartCalendarInterval` (Mon–Fri at the wake time), so it
   fires on wake-from-sleep even while you're already logged in.
-- All tunables (wake days, fallback duration, jiggle cadence/distance ranges,
-  start-jitter, pause poll interval, workday end + lunch start/length/jitter, the
-  feature toggles, the extra app list, the Codex/Claude prompts, the greeting and
-  its platform, the secrets path) are plain constants at the top of
-  `alibi-to-5.sh`.
+- All tunables (wake days, fallback duration, log-size cap, jiggle
+  cadence/distance ranges, start-jitter, pause poll interval, workday end + lunch
+  start/length/jitter, micro-break count/length, holiday `COUNTRY_CODE` +
+  `EXTRA_SKIP_DATES`, the feature toggles, the extra app list, the Codex/Claude
+  prompts, the greeting and its platform, the secrets path) are plain constants at
+  the top of `alibi-to-5.sh`.
 - Feature choices are stored **in the LaunchAgent** (as the arguments it passes
   to `run`), not in a separate state file — so the schedule keeps its flags even
   if you later change the config defaults. Re-run `set` to change them.
+
+## Roadmap
+
+- **Linux support.** Today the script is macOS-only. A Linux port maps each piece
+  to an equivalent, with Wayland the hard case for synthetic input:
+
+  | Piece | macOS | Linux equivalent |
+  |-------|-------|------------------|
+  | Wake scheduling | `pmset repeat wake` | `rtcwake` / `/sys/class/rtc/rtc0/wakealarm` (a single alarm — a cron/systemd job must re-arm the next weekday's wake) |
+  | Scheduler / agent | `launchd` plist | `systemd --user` timer or `cron` |
+  | Keep awake | `caffeinate` | `systemd-inhibit` / `caffeine` / GNOME inhibitor |
+  | Mouse jiggle | `cliclick` | `xdotool` (X11) or `ydotool` (Wayland) |
+  | Open apps | `open -a` | `xdg-open` / direct binary launch |
+
+  Open questions: X11 only or Wayland too; one cross-platform script with an OS
+  switch vs. `alibi-to-5-macos.sh` / `alibi-to-5-linux.sh`; and the distro/init
+  assumptions (systemd-only?).

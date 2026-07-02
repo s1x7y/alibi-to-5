@@ -138,6 +138,43 @@ check "roundtrip: until"        16:30 "$FEAT_UNTIL"
 check "roundtrip: lunch start"  12:45 "$FEAT_LUNCH_START"
 check "roundtrip: lunch length" 50    "$FEAT_LUNCH_MIN"
 
+# ---- holiday-skip flag: parse, default, canonical round-trip --------------
+parse_feature_flags
+check "holidays: default on" 1 "$FEAT_HOLIDAYS"
+parse_feature_flags --no-holidays
+check "holidays: --no-holidays off" 0 "$FEAT_HOLIDAYS"
+parse_feature_flags --no-holidays --holidays
+check "holidays: --holidays back on" 1 "$FEAT_HOLIDAYS"
+# canonical is fully explicit either way, and round-trips
+parse_feature_flags --no-holidays; build_canonical_flags
+case " ${CANON[*]} " in *" --no-holidays "*) hz=y ;; *) hz=n ;; esac
+check "holidays: canonical emits --no-holidays" y "$hz"
+parse_feature_flags "${CANON[@]}"
+check "holidays: round-trip off" 0 "$FEAT_HOLIDAYS"
+
+# ---- resolve_schedule: micro-break placement invariants -------------------
+# Nondeterministic (like the lunch jitter), so assert the invariants that must
+# ALWAYS hold across many rolls: parallel arrays stay in step, count <= max,
+# every break sits inside the active window, has positive length, and never
+# overlaps the lunch gap.
+mb_ok=yes
+for _ in $(seq 1 60); do
+  parse_feature_flags --until 23:59 --lunch 13:00/45   # wide window so breaks can fit
+  resolve_schedule
+  [ "${#MB_S_EPOCHS[@]}" -eq "${#MB_E_EPOCHS[@]}" ] || mb_ok=no
+  [ "${#MB_S_EPOCHS[@]}" -le "$MICROBREAK_MAX_COUNT" ] || mb_ok=no
+  for i in "${!MB_S_EPOCHS[@]}"; do
+    bs=${MB_S_EPOCHS[$i]}; be=${MB_E_EPOCHS[$i]}
+    [ "$be" -gt "$bs" ] || mb_ok=no                                   # positive length
+    [ "$be" -le "$WINDOW_END_EPOCH" ] || mb_ok=no                     # inside the window
+    # not overlapping the lunch gap
+    if [ "$LUNCH_S_EPOCH" -gt 0 ] && [ "$bs" -lt "$LUNCH_E_EPOCH" ] && [ "$be" -gt "$LUNCH_S_EPOCH" ]; then
+      mb_ok=no
+    fi
+  done
+done
+check "resolve_schedule: micro-break invariants hold over 60 rolls" yes "$mb_ok"
+
 # ---- write_plist: launchd survival + shape --------------------------------
 # The agent backgrounds long-lived work (caffeinate, the jiggle loop) and the
 # CLI pings, then run() exits. Without AbandonProcessGroup launchd flushes the
@@ -154,6 +191,48 @@ check "write_plist: AbandonProcessGroup is true" y "$wp"
 grep -q '<string>run</string>' "$PLIST_PATH" && wp=y || wp=n
 check "write_plist: still invokes run" y "$wp"
 rm -f "$PLIST_PATH"
+
+# ---- log_needs_rotation (0 = rotate) --------------------------------------
+log_needs_rotation 100 200 && r=y || r=n; check "log_needs_rotation: under cap"      n "$r"
+log_needs_rotation 200 200 && r=y || r=n; check "log_needs_rotation: exactly at cap" n "$r"
+log_needs_rotation 201 200 && r=y || r=n; check "log_needs_rotation: over cap"        y "$r"
+log_needs_rotation '' 200  && r=y || r=n; check "log_needs_rotation: empty size (no file)" n "$r"
+log_needs_rotation 0 0     && r=y || r=n; check "log_needs_rotation: zero cap disables"     n "$r"
+
+# ---- is_skip_day (0 = skip) -----------------------------------------------
+is_skip_day 2026-07-04 2026-01-01 2026-07-04 2026-12-25 && s=y || s=n
+check "is_skip_day: date in list"      y "$s"
+is_skip_day 2026-07-03 2026-01-01 2026-07-04 && s=y || s=n
+check "is_skip_day: date not in list"  n "$s"
+is_skip_day 2026-07-04 && s=y || s=n
+check "is_skip_day: empty list -> no"  n "$s"
+# a substring must not false-match (whole-token compare)
+is_skip_day 2026-07-0 2026-07-04 && s=y || s=n
+check "is_skip_day: no substring match" n "$s"
+
+# ---- extract_holiday_dates (parse Nager.Date JSON, dependency-free) --------
+FIX='[{"date":"2026-01-01","localName":"New Year"},{"date":"2026-07-04","name":"x"}]'
+check "extract_holiday_dates: two dates" "$(printf '2026-01-01\n2026-07-04')" "$(extract_holiday_dates "$FIX")"
+check "extract_holiday_dates: empty in -> empty" '' "$(extract_holiday_dates '[]')"
+# only YYYY-MM-DD shaped values, not other date-like fields
+FIX2='[{"date":"2026-03-15","counties":null,"launchYear":1990}]'
+check "extract_holiday_dates: ignores non-date numbers" '2026-03-15' "$(extract_holiday_dates "$FIX2")"
+
+# ---- in_microbreak (0 = inside a resolved micro-break window) -------------
+MB_S_EPOCHS=(1000 3000); MB_E_EPOCHS=(1500 3500)
+in_microbreak 1200 && m=y || m=n; check "in_microbreak: inside first"  y "$m"
+in_microbreak 3400 && m=y || m=n; check "in_microbreak: inside second" y "$m"
+in_microbreak 2000 && m=y || m=n; check "in_microbreak: between"       n "$m"
+in_microbreak 1500 && m=y || m=n; check "in_microbreak: end excl."     n "$m"
+MB_S_EPOCHS=(); MB_E_EPOCHS=()
+in_microbreak 1200 && m=y || m=n; check "in_microbreak: no windows"    n "$m"
+
+# should_jiggle also honors micro-breaks (composes in_microbreak)
+MB_S_EPOCHS=(1000); MB_E_EPOCHS=(1500)
+NOCF="$(mktemp)"; rm -f "$NOCF"
+should_jiggle 1200 0 0 "$NOCF" && j=y || j=n; check "should_jiggle: no during micro-break" n "$j"
+should_jiggle 2000 0 0 "$NOCF" && j=y || j=n; check "should_jiggle: yes outside micro-break" y "$j"
+MB_S_EPOCHS=(); MB_E_EPOCHS=()
 
 # ---- summary --------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

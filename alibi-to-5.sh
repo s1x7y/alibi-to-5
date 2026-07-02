@@ -10,6 +10,7 @@
 #   alibi-to-5.sh unset                 Cancel the schedule, remove the agent,
 #                                       and stop a running routine.
 #   alibi-to-5.sh test [flags]          Run the routine now and show the log tail.
+#   alibi-to-5.sh doctor [flags]        Preflight checks (Accessibility, bins, etc).
 #   alibi-to-5.sh pause [DURATION]      Take a break: stop looking active now.
 #   alibi-to-5.sh resume                End a pause.
 #   alibi-to-5.sh status                Show the schedule, agent state, log.
@@ -18,10 +19,11 @@
 # Internal (the LaunchAgent calls this; you never type it yourself):
 #   alibi-to-5.sh run [flags]           The wake routine itself.
 #
-# The routine: keep the Mac awake (caffeinate), run a humanized activity loop
-# (cliclick with randomized cadence/distance) so Slack/Teams do not show you
-# "away", shaped to a workday (optional end time + a jittered lunch gap where you
-# intentionally go Away, plus a random morning start delay and on-demand
+# The routine: skip the day entirely on a public holiday / PTO date, else keep
+# the Mac awake (caffeinate), run a humanized activity loop (cliclick with
+# randomized cadence/distance) so Slack/Teams do not show you "away", shaped to a
+# workday (optional end time + a jittered lunch gap and short random micro-breaks
+# where you intentionally go Away, plus a random morning start delay and on-demand
 # pause/resume), open the enabled apps (Slack/Teams), ping the enabled CLIs
 # (Codex/Claude) to start their usage windows, and optionally post a good-morning
 # message to a Slack/Teams webhook. Every integration is an independent toggle --
@@ -41,6 +43,7 @@ PIDFILE="$HOME/Library/Logs/alibi-to-5.pids"       # PIDs of the running routine
 CONTROLFILE="$HOME/Library/Logs/alibi-to-5.control" # pause state: a "paused-until" epoch (0 = indefinite)
 STATEFILE="$HOME/Library/Logs/alibi-to-5.state"    # today's resolved window/lunch epochs, for 'status'
 KEEP_AWAKE_SECONDS=32400                            # fallback active-window length (~9h) when WORK_END is unset
+LOG_MAX_BYTES=$((5 * 1024 * 1024))                 # rotate the log to .log.1 once it exceeds this (0 disables)
 
 # Humanized jiggle: cadence and distance are randomized per nudge so the activity
 # does not look like a metronome. Keep the MAX interval under the away threshold
@@ -60,6 +63,26 @@ WORK_END=""                                        # "HH:MM" end-of-day; empty -
 LUNCH_START=""                                      # "HH:MM" lunch start; empty -> no lunch gap
 LUNCH_MINUTES=45                                    # lunch length
 LUNCH_JITTER_MINUTES=10                             # +/- randomization on lunch start and length, rolled per day
+
+# Micro-breaks: short random "Away" gaps sprinkled through the day beyond lunch
+# (coffee/bathroom). Kept UNDER the away threshold so they read as brief natural
+# gaps, not a disconnect. Resolved per day in resolve_schedule.
+MICROBREAK_MAX_COUNT=3                              # up to N micro-breaks/day (0 disables)
+MICROBREAK_MIN_MINUTES=4                            # each break's length, lower bound
+MICROBREAK_MAX_MINUTES=12                           # each break's length, upper bound (keep <= ~away threshold)
+
+# Holiday / PTO skip: on a skip day the routine does not run at all (machine goes
+# back to sleep, you look genuinely offline). Public holidays come from the
+# Nager.Date API for COUNTRY_CODE, cached per year; EXTRA_SKIP_DATES adds manual
+# PTO/one-offs the API can't know. Fail-open: any lookup failure -> run normally.
+ENABLE_HOLIDAY_SKIP=1                               # master toggle (also --holidays/--no-holidays on 'set')
+COUNTRY_CODE=""                                     # ISO-3166 alpha-2 (e.g. US, PT); empty -> no holiday lookup
+EXTRA_SKIP_DATES=()                                 # manual YYYY-MM-DD skip dates (PTO / one-offs)
+HOLIDAY_CACHE_DIR="$HOME/.config/alibi-to-5"        # cached holidays-<YYYY>.json lives here
+
+# Today's resolved micro-break windows (parallel arrays), filled by resolve_schedule.
+MB_S_EPOCHS=()
+MB_E_EPOCHS=()
 
 # Feature toggles (defaults). Each is also a --flag / --no-flag on 'set', and the
 # resolved choice is baked into the LaunchAgent, so it applies on every wake.
@@ -184,20 +207,60 @@ hm_to_epoch() {
   date -j -f "%Y-%m-%d %H:%M" "$(date +%F) $1" +%s 2>/dev/null
 }
 
-# True (0) when the loop should nudge right now: not in the lunch gap and not
-# manually paused. Composes the tested predicates above.
+# True (0) when NOW falls inside one of today's resolved micro-break windows,
+# held in the parallel MB_S_EPOCHS / MB_E_EPOCHS arrays (see resolve_schedule).
+# Empty arrays -> never inside, so micro-breaks disabled is simply never hit.
+in_microbreak() {
+  local now=$1 i n=${#MB_S_EPOCHS[@]}
+  for (( i = 0; i < n; i++ )); do
+    in_window "$now" "${MB_S_EPOCHS[$i]}" "${MB_E_EPOCHS[$i]}" && return 0
+  done
+  return 1
+}
+
+# True (0) when the loop should nudge right now: not in the lunch gap, not in a
+# micro-break, and not manually paused. Composes the tested predicates above.
 should_jiggle() {
   local now=$1 ls=$2 le=$3 cf=$4
   in_window "$now" "$ls" "$le" && return 1
+  in_microbreak "$now" && return 1
   is_paused "$cf" "$now" && return 1
   return 0
+}
+
+# True (0) when the log file should be rotated: its size in bytes exceeds the
+# cap. A non-numeric size (no file) or a zero/disabled cap never rotates.
+log_needs_rotation() {
+  local bytes=$1 cap=$2
+  case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$cap" -gt 0 ] || return 1
+  [ "$bytes" -gt "$cap" ]
+}
+
+# True (0) when TODAY (YYYY-MM-DD) is one of the given skip dates. Whole-token
+# compare, so a prefix like 2026-07-0 never matches 2026-07-04. Empty list -> no.
+is_skip_day() {
+  local today=$1 d; shift
+  for d in "$@"; do
+    [ "$d" = "$today" ] && return 0
+  done
+  return 1
+}
+
+# Pull YYYY-MM-DD values out of a Nager.Date PublicHolidays JSON payload, one per
+# line, dependency-free (no jq). Matches only the "date":"..." fields, so numeric
+# fields like launchYear are ignored.
+extract_holiday_dates() {
+  printf '%s' "$1" \
+    | grep -oE '"date":"[0-9]{4}-[0-9]{2}-[0-9]{2}"' \
+    | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}'
 }
 
 # Resolve the day's schedule from the flags: the active-window end epoch, the
 # caffeinate duration derived from it, and today's (jittered) lunch window. Sets
 # WINDOW_END_EPOCH / CAFFEINATE_SECS / LUNCH_S_EPOCH / LUNCH_E_EPOCH.
 resolve_schedule() {
-  local now end base js jlen
+  local now end base js jlen count span slot i slot_s slot_e len bs be
   now=$(date +%s)
   # Active-window end: explicit WORK_END wins; else fall back to the duration.
   # Also fall back if the end time is missing, malformed, or already past.
@@ -222,6 +285,31 @@ resolve_schedule() {
       [ "$LUNCH_E_EPOCH" -gt "$WINDOW_END_EPOCH" ] && LUNCH_E_EPOCH=$WINDOW_END_EPOCH
     fi
   fi
+
+  # Micro-breaks: split the remaining active span into `count` equal slots and drop
+  # one short break of random length into each, skipping any that would collide with
+  # the lunch gap. Per-slot placement keeps the breaks from overlapping each other.
+  MB_S_EPOCHS=(); MB_E_EPOCHS=()
+  if [ "$MICROBREAK_MAX_COUNT" -gt 0 ]; then
+    count=$(rand_between 0 "$MICROBREAK_MAX_COUNT")
+    if [ "$count" -gt 0 ] && [ "$WINDOW_END_EPOCH" -gt "$now" ]; then
+      span=$(( WINDOW_END_EPOCH - now ))
+      slot=$(( span / count ))
+      for (( i = 0; i < count; i++ )); do
+        len=$(( $(rand_between "$MICROBREAK_MIN_MINUTES" "$MICROBREAK_MAX_MINUTES") * 60 ))
+        slot_s=$(( now + i * slot ))
+        slot_e=$(( now + (i + 1) * slot ))
+        [ $(( slot_e - len )) -le "$slot_s" ] && continue   # break can't fit this slot
+        bs=$(rand_between "$slot_s" $(( slot_e - len )))
+        be=$(( bs + len ))
+        # skip a break that would overlap the lunch gap
+        if [ "$LUNCH_S_EPOCH" -gt 0 ] && [ "$bs" -lt "$LUNCH_E_EPOCH" ] && [ "$be" -gt "$LUNCH_S_EPOCH" ]; then
+          continue
+        fi
+        MB_S_EPOCHS+=("$bs"); MB_E_EPOCHS+=("$be")
+      done
+    fi
+  fi
 }
 
 # Resolve the feature toggles: start from the config-constant defaults, then
@@ -238,6 +326,7 @@ parse_feature_flags() {
   FEAT_UNTIL=$WORK_END
   FEAT_LUNCH_START=$LUNCH_START
   FEAT_LUNCH_MIN=$LUNCH_MINUTES
+  FEAT_HOLIDAYS=$ENABLE_HOLIDAY_SKIP
   local l
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -257,6 +346,8 @@ parse_feature_flags() {
                          FEAT_LUNCH_START=${l%%/*}
                          case "$l" in */*) FEAT_LUNCH_MIN=${l##*/} ;; esac ;;
       --no-lunch)        FEAT_LUNCH_START="" ;;
+      --holidays)        FEAT_HOLIDAYS=1 ;;
+      --no-holidays)     FEAT_HOLIDAYS=0 ;;
     esac
     shift
   done
@@ -281,6 +372,7 @@ build_canonical_flags() {
   else
     CANON+=(--no-lunch)
   fi
+  [ "$FEAT_HOLIDAYS" = 1 ] && CANON+=(--holidays) || CANON+=(--no-holidays)
 }
 
 # POST plain text to an incoming webhook. curl -f makes a 4xx/5xx a failure we
@@ -319,6 +411,49 @@ send_good_morning() {
   fi
 }
 
+# Rotate the log to a single .log.1 backup once it passes LOG_MAX_BYTES, so it
+# cannot grow unbounded over months. Best-effort; never blocks a run.
+rotate_log() {
+  local bytes
+  bytes=$(stat -f%z "$LOG" 2>/dev/null)
+  if log_needs_rotation "${bytes:-}" "$LOG_MAX_BYTES"; then
+    mv -f "$LOG" "$LOG.1" 2>/dev/null || true
+  fi
+}
+
+# Path to this year's cached public-holiday file.
+holiday_cache_file() { echo "$HOLIDAY_CACHE_DIR/holidays-$(date +%Y).json"; }
+
+# Ensure this year's public-holiday cache exists, fetching it once from the
+# Nager.Date API for COUNTRY_CODE. Best-effort and FAIL-OPEN: no country set, no
+# network, or a bad/empty response leaves the cache absent and returns non-zero,
+# so the caller falls back to running (never a false skip).
+ensure_holiday_cache() {
+  local year cache
+  [ -n "$COUNTRY_CODE" ] || return 1
+  year=$(date +%Y); cache="$HOLIDAY_CACHE_DIR/holidays-$year.json"
+  [ -s "$cache" ] && return 0
+  mkdir -p "$HOLIDAY_CACHE_DIR"
+  if curl -fsS "https://date.nager.at/api/v3/PublicHolidays/$year/$COUNTRY_CODE" -o "$cache" 2>>"$LOG" \
+     && [ -s "$cache" ]; then
+    return 0
+  fi
+  rm -f "$cache" 2>/dev/null
+  return 1
+}
+
+# Today's full skip-date set: cached public holidays (when available) plus the
+# manual EXTRA_SKIP_DATES (PTO / one-offs the API can't know). One date per line.
+load_skip_dates() {
+  if ensure_holiday_cache; then
+    extract_holiday_dates "$(cat "$(holiday_cache_file)" 2>/dev/null)"
+  fi
+  local d
+  for d in ${EXTRA_SKIP_DATES[@]+"${EXTRA_SKIP_DATES[@]}"}; do
+    printf '%s\n' "$d"
+  done
+}
+
 # Stop an in-flight routine started by a previous 'run': the caffeinate hold and
 # the activity loop, both recorded in PIDFILE. Both self-terminate at the window
 # end, but this lets 'unset' end them now. We match on IDENTITY (the recorded PID
@@ -354,6 +489,8 @@ Usage:
   alibi-to-5.sh unset                 Cancel the schedule, remove the agent, and
                                       stop a running routine (caffeinate + loop).
   alibi-to-5.sh test [flags]          Run the routine now and show the log tail.
+  alibi-to-5.sh doctor [flags]        Preflight checks (Accessibility grant, bins,
+                                      webhook, schedule, power). 'set' runs it too.
   alibi-to-5.sh pause [DURATION]      Take a break: stop looking active now (you
                                       go "Away"). No DURATION = until 'resume';
                                       else 30m / 1h / 90s / a number of minutes.
@@ -373,6 +510,8 @@ baked into the agent, so it applies on every wake):
   --until HH:MM               End the active window at this time (default: ~9h).
   --lunch HH:MM[/MIN]         Idle lunch gap (default 45m), jittered daily.
   --no-lunch                  Disable the lunch gap.
+  --holidays / --no-holidays  Skip public-holiday/PTO days entirely (default: on).
+                              Needs COUNTRY_CODE set; PTO via EXTRA_SKIP_DATES.
 
 Example:
   alibi-to-5.sh set 09:40 --teams --until 17:00 --lunch 13:00 \
@@ -475,6 +614,9 @@ cmd_set() {
   say "  * System Settings -> Lock Screen -> require password 'Never' (keeps FileVault on)."
   say
   pmset -g sched
+  say
+  say "Preflight (doctor) -- warnings do not block the schedule:"
+  cmd_doctor "${CANON[@]}" || true
 }
 
 # ---- unset ----------------------------------------------------------------
@@ -527,7 +669,23 @@ cmd_resume() {
 # ---- run (the routine the agent calls; not shown in help) -----------------
 cmd_run() {
   parse_feature_flags "$@"
+  rotate_log
   log "==== alibi-to-5 run starting ===="
+
+  # Holiday / PTO skip: on a skip day, do not run at all -- the machine goes back
+  # to sleep and you look genuinely offline. FAIL-OPEN: any lookup trouble falls
+  # through to a normal run, since a false skip (looking offline on a real
+  # workday) is the exact failure this tool exists to prevent.
+  if [ "$FEAT_HOLIDAYS" = 1 ]; then
+    local today skipdates
+    today=$(date +%F)
+    skipdates=$(load_skip_dates)
+    if [ -n "$skipdates" ] && is_skip_day "$today" $skipdates; then
+      log "Today ($today) is a skip day (holiday/PTO); not running."
+      log "==== run done (skipped) ===="
+      return 0
+    fi
+  fi
 
   # Fresh run: supersede any previous one and clear a stale pause (a pause never
   # carries into a new day). PIDFILE lists the caffeinate + loop PIDs for 'unset'.
@@ -535,12 +693,16 @@ cmd_run() {
   : >"$PIDFILE"
   rm -f "$CONTROLFILE"
 
-  # Resolve today's window + (jittered) lunch, and record them for 'status'.
+  # Resolve today's window + (jittered) lunch + micro-breaks, record for 'status'.
+  local i
   resolve_schedule
   { echo "window_end=$WINDOW_END_EPOCH"
     echo "lunch_start=$LUNCH_S_EPOCH"
-    echo "lunch_end=$LUNCH_E_EPOCH"; } >"$STATEFILE"
-  log "Window ends $(date -r "$WINDOW_END_EPOCH" '+%H:%M'); lunch $([ "$LUNCH_S_EPOCH" -gt 0 ] && echo "$(date -r "$LUNCH_S_EPOCH" '+%H:%M')-$(date -r "$LUNCH_E_EPOCH" '+%H:%M')" || echo off)."
+    echo "lunch_end=$LUNCH_E_EPOCH"
+    for i in ${!MB_S_EPOCHS[@]+"${!MB_S_EPOCHS[@]}"}; do
+      echo "microbreak=${MB_S_EPOCHS[$i]}-${MB_E_EPOCHS[$i]}"
+    done; } >"$STATEFILE"
+  log "Window ends $(date -r "$WINDOW_END_EPOCH" '+%H:%M'); lunch $([ "$LUNCH_S_EPOCH" -gt 0 ] && echo "$(date -r "$LUNCH_S_EPOCH" '+%H:%M')-$(date -r "$LUNCH_E_EPOCH" '+%H:%M')" || echo off); micro-breaks ${#MB_S_EPOCHS[@]}."
 
   # 0. Keep the Mac awake. A scheduled wake on battery re-sleeps quickly
   #    otherwise; caffeinate holds display + system awake until the window end.
@@ -635,6 +797,85 @@ cmd_run() {
   log "==== run done ===="
 }
 
+# ---- doctor ---------------------------------------------------------------
+# Surface the failures that are otherwise silent (most importantly: cliclick
+# no-ops without an Accessibility grant, so the jiggle "runs" but you still go
+# Away). Prints OK/WARN/FAIL lines; returns non-zero if a HARD check failed.
+# 'set' also runs this in warn mode. Takes the same feature flags as run/set.
+cmd_doctor() {
+  parse_feature_flags "$@"
+  rotate_log
+  local hard_fail=0
+  say "== alibi-to-5 doctor =="
+
+  # (a) Accessibility ACTUALLY works: move the cursor and read it back. cliclick
+  #     exits 0 without the grant but never moves, so movement is the only proof.
+  local cliclick pos1 pos2
+  cliclick="$(resolve_bin cliclick)"
+  if [ -z "$cliclick" ]; then
+    say "FAIL  cliclick not found (brew install cliclick) -- the jiggle can't run."
+    hard_fail=1
+  else
+    pos1="$("$cliclick" p: 2>/dev/null)"
+    "$cliclick" "m:+10,+0" >/dev/null 2>&1
+    pos2="$("$cliclick" p: 2>/dev/null)"
+    "$cliclick" "m:-10,+0" >/dev/null 2>&1        # restore the cursor
+    if [ -n "$pos1" ] && [ "$pos1" != "$pos2" ]; then
+      say "OK    Accessibility: cursor moved ($pos1 -> $pos2); grant is active."
+    else
+      say "FAIL  Accessibility: cursor did NOT move -- the jiggle will no-op and you"
+      say "      will go Away. Grant your terminal/shell access in System Settings"
+      say "      -> Privacy & Security -> Accessibility, then re-run 'doctor'."
+      hard_fail=1
+    fi
+  fi
+
+  # (b) Enabled CLI integrations resolve on the login-shell PATH.
+  if [ "$FEAT_CODEX" = 1 ]; then
+    if [ -n "$(resolve_bin codex)" ]; then say "OK    codex CLI resolves."
+    else say "FAIL  codex enabled but not found on the login-shell PATH."; hard_fail=1; fi
+  fi
+  if [ "$FEAT_CLAUDE" = 1 ]; then
+    if [ -n "$(resolve_bin claude)" ]; then say "OK    claude CLI resolves."
+    else say "FAIL  claude enabled but not found on the login-shell PATH."; hard_fail=1; fi
+  fi
+
+  # (c) Good-morning webhook config -- PRESENCE ONLY, never a POST (no channel noise).
+  if [ -n "$GM_TEXT" ]; then
+    local var url
+    case "$GM_PLATFORM" in teams) var=TEAMS_WEBHOOK_URL ;; *) var=SLACK_WEBHOOK_URL ;; esac
+    if [ ! -f "$SECRETS_FILE" ]; then
+      say "FAIL  good-morning set but $SECRETS_FILE is missing."; hard_fail=1
+    else
+      # shellcheck disable=SC1090
+      url=$(. "$SECRETS_FILE" >/dev/null 2>&1; printf '%s' "${!var:-}")
+      if [ -n "$url" ]; then say "OK    good-morning webhook ($var) is set."
+      else say "FAIL  good-morning platform '$GM_PLATFORM' has no $var in $SECRETS_FILE."; hard_fail=1; fi
+    fi
+  fi
+
+  # (d) Schedule + agent actually armed.
+  if pmset -g sched 2>/dev/null | grep -q wake; then say "OK    repeating wake is registered (pmset)."
+  else say "WARN  no repeating wake found -- run 'set'."; fi
+  if launchctl list 2>/dev/null | grep -qi alibi-to-5; then say "OK    LaunchAgent is loaded."
+  else say "WARN  LaunchAgent not loaded -- run 'set'."; fi
+
+  # (e) Power source -- a ~9h caffeinate on battery is rough (warning only).
+  if pmset -g batt 2>/dev/null | grep -q "'AC Power'"; then say "OK    on AC power."
+  else say "WARN  on battery -- a full-day caffeinate will drain it."; fi
+
+  # (f) Holiday lookup reachable, when enabled.
+  if [ "$FEAT_HOLIDAYS" = 1 ] && [ -n "$COUNTRY_CODE" ]; then
+    if ensure_holiday_cache; then say "OK    holiday list cached for $COUNTRY_CODE ($(date +%Y))."
+    else say "WARN  holiday lookup for $COUNTRY_CODE unavailable (fail-open: still runs)."; fi
+  fi
+
+  say
+  if [ "$hard_fail" = 0 ]; then say "doctor: all hard checks passed."
+  else say "doctor: one or more HARD checks FAILED (see FAIL lines above)."; fi
+  return "$hard_fail"
+}
+
 # ---- test -----------------------------------------------------------------
 cmd_test() {
   say "Running the routine now... (this starts the real ~9h caffeinate + jiggle)"
@@ -666,14 +907,22 @@ cmd_status() {
   fi
   # Today's resolved window + lunch (written by the last 'run').
   if [ -f "$STATEFILE" ]; then
-    local k v we="" ls="" le="" now; now=$(date +%s)
+    local k v we="" ls="" le="" mbs mbe mblines="" now; now=$(date +%s)
     while IFS='=' read -r k v; do
-      case "$k" in window_end) we=$v ;; lunch_start) ls=$v ;; lunch_end) le=$v ;; esac
+      case "$k" in
+        window_end) we=$v ;;
+        lunch_start) ls=$v ;;
+        lunch_end) le=$v ;;
+        microbreak)
+          mbs=${v%%-*}; mbe=${v##*-}
+          mblines+="micro-break $(date -r "$mbs" '+%H:%M')-$(date -r "$mbe" '+%H:%M')$(in_window "$now" "$mbs" "$mbe" && echo ' (now)')"$'\n' ;;
+      esac
     done <"$STATEFILE"
     [ -n "$we" ] && [ "$we" -gt 0 ] && say "active window until $(date -r "$we" '+%H:%M')."
     if [ -n "$ls" ] && [ "$ls" -gt 0 ]; then
       say "lunch gap $(date -r "$ls" '+%H:%M')-$(date -r "$le" '+%H:%M')$(in_window "$now" "$ls" "$le" && echo ' (now)')."
     fi
+    [ -n "$mblines" ] && printf '%s' "$mblines"
   fi
   # Manual pause state.
   if is_paused "$CONTROLFILE" "$(date +%s)"; then
@@ -696,6 +945,7 @@ main() {
     unset)          cmd_unset ;;
     run)            shift; cmd_run "$@" ;;   # internal: invoked by the LaunchAgent
     test)           shift; cmd_test "$@" ;;
+    doctor)         shift; cmd_doctor "$@" ;;
     pause)          shift; cmd_pause "${1:-}" ;;
     resume)         cmd_resume ;;
     status)         cmd_status ;;
