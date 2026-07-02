@@ -4,15 +4,15 @@ These are queued for a `superpowers:brainstorming` → `superpowers:writing-plan
 pass before any implementation. Each has open questions to resolve during
 brainstorming.
 
-> **Resume here (paused 2026-07-02).** Brainstormed improvement ideas; user chose
-> to queue two clusters — **item 5 (Reliability & operability)** and **item 6
-> (More realism)** — to brainstorm into a spec next session. Their open questions
-> are listed under each. Also considered but **not** queued (revisit if wanted):
-> an **external config file** (`~/.config/alibi-to-5/config` so the public script
-> stays pristine across `git pull`), and an **integrations/flexibility** cluster
-> (Slack presence/status via API, per-day & one-off schedule overrides, CI running
-> shellcheck + the 61-test suite on push). Next step: `superpowers:brainstorming`
-> on items 5 and 6.
+> **Status (2026-07-02).** Items **5 (Reliability & operability)** and **6 (More
+> realism)** are now **SHIPPED** — see below. Item **1 (Linux)** is captured as a
+> **Roadmap** section in the README (not implemented). Design:
+> `docs/superpowers/specs/2026-07-02-reliability-and-realism-design.md`.
+> Still open / not queued (revisit if wanted): an **external config file**
+> (`~/.config/alibi-to-5/config` so the public script stays pristine across `git
+> pull`), and an **integrations/flexibility** cluster (Slack presence/status via
+> API, per-day & one-off schedule overrides, CI running shellcheck + the test
+> suite on push).
 
 ## Shipped 2026-07-02 — humanize + workday shape + break controls
 Randomized jiggle cadence/distance, random morning start delay, explicit
@@ -56,9 +56,10 @@ just launched), and the usage window resets ~5h after wake time. NOTE: `codex ex
 reads stdin ("Reading additional input from stdin...") — under launchd stdin is
 /dev/null so it gets EOF and proceeds; fine, but keep in mind if behavior changes.
 
-## 1. Linux support
-Today the script is macOS-only. Map each piece to a Linux equivalent and decide
-how to keep one script vs. split by OS.
+## 1. Linux support — captured in README Roadmap (not implemented)
+Today the script is macOS-only. The mapping below now lives as a **Roadmap**
+section in the README. Map each piece to a Linux equivalent and decide how to keep
+one script vs. split by OS.
 - Wake scheduling: `pmset repeat wake` → `rtcwake` / `/sys/class/rtc/rtc0/wakealarm`
   (note: RTC wake usually does a single alarm, not a recurring weekday schedule —
   may need a cron/systemd job that re-arms the next wake each day).
@@ -71,7 +72,18 @@ how to keep one script vs. split by OS.
   OS switch, or `alibi-to-5-macos.sh` / `alibi-to-5-linux.sh`? Distro/init
   assumptions (systemd-only?).
 
-## 5. Reliability & operability — catch the silent-failure modes
+## 5. Reliability & operability — SHIPPED 2026-07-02
+Shipped as the `doctor` subcommand (also run by `set` in warn mode) plus in-script
+log rotation. `doctor` verifies the Accessibility grant by **moving the cursor and
+reading it back** (the real silent failure), that enabled CLIs resolve, the
+good-morning webhook is configured (presence only, no POST), the wake + agent are
+armed, and that you're on AC power; it prints OK/WARN/FAIL and exits non-zero on a
+hard failure. Log rotation caps `alibi-to-5.log` at `LOG_MAX_BYTES` (~5 MB) with a
+single `.log.1` backup, at the top of `run`. **To confirm on a real machine with
+cliclick installed:** `doctor` reports FAIL when Accessibility is revoked, OK when
+granted, and restores the cursor.
+
+Original notes (for reference):
 Today several failures are silent (most importantly: `cliclick` no-ops without an
 Accessibility grant, so the jiggle "runs" but the cursor never moves and you still
 go Away). Add operability that surfaces these before a real wake.
@@ -92,7 +104,19 @@ go Away). Add operability that surfaces these before a real wake.
   post? Slack has no silent ping)? Log-rotation mechanism — in-script truncation
   vs `newsyslog.d` vs `logrotate`-style?
 
-## 6. More realism — further humanize the footprint
+## 6. More realism — SHIPPED 2026-07-02
+Shipped: **holiday/PTO skip** (on a skip day `run` exits before `caffeinate` — the
+Mac sleeps and you look offline; public holidays pulled from the Nager.Date API
+for `COUNTRY_CODE`, cached per year, dependency-free parse, plus manual
+`EXTRA_SKIP_DATES`; `--no-holidays` per schedule; fail-open on any lookup trouble)
+and **micro-breaks** (up to `MICROBREAK_MAX_COUNT` short 4–12m Away gaps/day,
+non-overlapping, avoiding lunch, honored by `should_jiggle`, shown by `status`).
+**Wake-time jitter** was decided already-satisfied by the existing
+`START_JITTER_MAX_SECONDS` (keeps the "set once" model; documented, no new code).
+**To confirm on a real wake:** a configured holiday / `EXTRA_SKIP_DATES` entry
+skips the day, and micro-breaks actually produce short Away periods then resume.
+
+Original notes (for reference):
 Extend the humanization beyond the lunch gap and per-nudge jitter.
 - **Holiday / skip-dates awareness:** don't look "active" on company holidays or
   PTO — a mid-week, all-day-active machine on a holiday is a red flag.
