@@ -435,7 +435,7 @@ holiday_cache_file() { echo "$HOLIDAY_CACHE_DIR/holidays-$(date +%Y).json"; }
 ensure_holiday_cache() {
   local year cache country=${FEAT_COUNTRY:-$COUNTRY_CODE}
   [ -n "$country" ] || return 1
-  year=$(date +%Y); cache="$HOLIDAY_CACHE_DIR/holidays-$year.json"
+  year=$(date +%Y); cache="$(holiday_cache_file)"
   [ -s "$cache" ] && return 0
   mkdir -p "$HOLIDAY_CACHE_DIR"
   if curl -fsS "https://date.nager.at/api/v3/PublicHolidays/$year/$country" -o "$cache" 2>>"$LOG" \
