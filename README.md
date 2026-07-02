@@ -1,16 +1,25 @@
+<p align="center">
+  <img src="assets/banner.png" alt="alibi-to-5 — Presence Assurance System. Always online, never here." width="100%">
+</p>
+
 # alibi-to-5
 
-*Your Mac clocks in so you don't have to.*
+*Your Mac clocks in so you can catch the tide.*
 
-One script that wakes your Mac on weekdays and, on wake, keeps it awake, keeps
-your Slack/Teams status green (via a real mouse jiggle), opens your apps, starts
-your Codex/Claude usage windows, and optionally posts a good-morning message. It
-also takes a jittered lunch, sprinkles in short coffee breaks, and skips public
-holidays — because a machine that's active nine hours straight, 365 days a year,
-fools nobody.
+Built by a surfer. Good waves don't check whether standup is at 9 — some mornings
+the tide's up at seven, other days not until two. I've never missed a meeting or a
+deadline, and every manager I've had called me a great employee. But a few of them
+policed the green dot like a time card: *"why weren't you online at 9?"* This keeps
+that dot green so those managers stay happy, while you're out on the water, chasing
+your own hobby, or just sleeping in.
 
-For people who deliver on a shifted schedule and just need presence monitoring to
-mind its own business.
+One script wakes your Mac on weekdays and, on wake, keeps it awake, keeps your
+Slack/Teams status green (a real mouse jiggle), opens your apps, starts your
+Codex/Claude usage windows, and optionally posts a good-morning message. It even
+takes a jittered lunch, sprinkles in short coffee breaks, and skips public holidays
+— because a machine active nine hours straight, 365 days a year, fools nobody.
+
+Do the work on your own clock; let the dot handle the optics.
 
 ## Run it
 
