@@ -861,13 +861,15 @@ cmd_doctor() {
   fi
 
   # (d) Schedule + agent actually armed.
-  if pmset -g sched 2>/dev/null | grep -q wake; then say "OK    repeating wake is registered (pmset)."
+  # grep without -q: -q exits at first match, SIGPIPEs the left side, and
+  # pipefail turns that 141 into a false negative.
+  if pmset -g sched 2>/dev/null | grep wake >/dev/null; then say "OK    repeating wake is registered (pmset)."
   else say "WARN  no repeating wake found -- run 'set'."; fi
-  if launchctl list 2>/dev/null | grep -qi alibi-to-5; then say "OK    LaunchAgent is loaded."
+  if launchctl list 2>/dev/null | grep -i alibi-to-5 >/dev/null; then say "OK    LaunchAgent is loaded."
   else say "WARN  LaunchAgent not loaded -- run 'set'."; fi
 
   # (e) Power source -- a ~9h caffeinate on battery is rough (warning only).
-  if pmset -g batt 2>/dev/null | grep -q "'AC Power'"; then say "OK    on AC power."
+  if pmset -g batt 2>/dev/null | grep "'AC Power'" >/dev/null; then say "OK    on AC power."
   else say "WARN  on battery -- a full-day caffeinate will drain it."; fi
 
   # (f) Holiday lookup reachable, when enabled.
