@@ -781,7 +781,8 @@ cmd_run() {
   if [ "$FEAT_CODEX" = 1 ]; then
     codex="$(resolve_bin codex)"
     if [ -n "$codex" ]; then
-      "$codex" exec --sandbox read-only "$CODEX_PROMPT" >>"$LOG" 2>&1 &
+      # launchd cwd is not a trusted git repo, and stdin must be closed or codex waits on it
+      "$codex" exec --skip-git-repo-check --sandbox read-only "$CODEX_PROMPT" </dev/null >>"$LOG" 2>&1 &
       log "Codex '$CODEX_PROMPT' dispatched via $codex."
     else
       log "WARNING: codex CLI not found via login shell PATH; skipped."
@@ -790,7 +791,7 @@ cmd_run() {
   if [ "$FEAT_CLAUDE" = 1 ]; then
     claude="$(resolve_bin claude)"
     if [ -n "$claude" ]; then
-      "$claude" -p "$CLAUDE_PROMPT" >>"$LOG" 2>&1 &
+      "$claude" -p "$CLAUDE_PROMPT" </dev/null >>"$LOG" 2>&1 &
       log "Claude '$CLAUDE_PROMPT' dispatched via $claude."
     else
       log "WARNING: claude CLI not found via login shell PATH; skipped."
