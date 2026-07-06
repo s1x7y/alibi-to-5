@@ -11,6 +11,9 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# Pin the .env path so a real ~/.config/alibi-to-5/.env can't skew the
+# default-value assertions below.
+export ALIBI_ENV_FILE=/dev/null
 # shellcheck disable=SC1091
 source "$HERE/../alibi-to-5.sh"
 
@@ -46,14 +49,27 @@ check "interpolate: {date}" "$(date '+%Y-%m-%d')" "$(interpolate '{date}')"
 check "interpolate: unknown token left as-is" 'hi {nope}' "$(interpolate 'hi {nope}')"
 check "interpolate: mixed" "online $(date '+%A')" "$(interpolate 'online {day}')"
 
-# ---- parse_feature_flags: defaults ----------------------------------------
+# ---- parse_feature_flags: defaults (every feature off) ---------------------
 parse_feature_flags
-check "defaults: slack on"     1        "$FEAT_SLACK"
+check "defaults: slack off"    0        "$FEAT_SLACK"
 check "defaults: teams off"    0        "$FEAT_TEAMS"
-check "defaults: codex on"     1        "$FEAT_CODEX"
+check "defaults: codex off"    0        "$FEAT_CODEX"
 check "defaults: claude off"   0        "$FEAT_CLAUDE"
 check "defaults: gm text empty" ''      "$GM_TEXT"
 check "defaults: gm platform"  slack    "$GM_PLATFORM"
+
+# ---- .env file: overrides defaults, flags still win ------------------------
+envtmp=$(mktemp)
+printf 'ENABLE_CODEX=1\nSLACK_WEBHOOK_URL="https://example.invalid/hook"\n' >"$envtmp"
+env_out=$(ALIBI_ENV_FILE="$envtmp" bash -c '
+  source "'"$HERE"'/../alibi-to-5.sh"
+  parse_feature_flags
+  codex_env=$FEAT_CODEX
+  parse_feature_flags --no-codex
+  echo "$codex_env $FEAT_CODEX $SLACK_WEBHOOK_URL"')
+rm -f "$envtmp"
+check ".env: overrides default, flag wins, webhook sourced" \
+  "1 0 https://example.invalid/hook" "$env_out"
 
 # ---- parse_feature_flags: overrides ---------------------------------------
 parse_feature_flags --no-slack --teams --no-codex --claude --good-morning 'hi {day}' --gm-platform teams
@@ -65,7 +81,7 @@ check "override: gm text"      'hi {day}'   "$GM_TEXT"
 check "override: gm platform"  teams        "$GM_PLATFORM"
 
 # ---- canonical serialization round-trips ----------------------------------
-parse_feature_flags --no-slack --teams --claude --good-morning 'morning {time}' --gm-platform teams
+parse_feature_flags --no-slack --teams --codex --claude --good-morning 'morning {time}' --gm-platform teams
 build_canonical_flags   # fills CANON=(...)
 parse_feature_flags "${CANON[@]}"
 check "roundtrip: slack off"   0                "$FEAT_SLACK"
@@ -140,7 +156,7 @@ check "roundtrip: lunch length" 50    "$FEAT_LUNCH_MIN"
 
 # ---- holiday-skip flag: parse, default, canonical round-trip --------------
 parse_feature_flags
-check "holidays: default on" 1 "$FEAT_HOLIDAYS"
+check "holidays: default off" 0 "$FEAT_HOLIDAYS"
 parse_feature_flags --no-holidays
 check "holidays: --no-holidays off" 0 "$FEAT_HOLIDAYS"
 parse_feature_flags --no-holidays --holidays

@@ -61,17 +61,18 @@ macOS runs the routine every weekday. Two one-time macOS settings:
 ## Flags
 
 Pass to `set` (or `test`). Each is baked into the schedule, so it sticks on every
-wake. Defaults are plain constants at the top of the script.
+wake. **Every feature is off by default** — opt in per feature, either with a flag
+or in the config file (below).
 
 | Flag | What it does | Default |
 |------|--------------|---------|
-| `--slack` / `--no-slack` | Open Slack | on |
+| `--slack` / `--no-slack` | Open Slack | off |
 | `--teams` / `--no-teams` | Open Microsoft Teams | off |
-| `--codex` / `--no-codex` | Ping the Codex CLI usage window | on |
+| `--codex` / `--no-codex` | Ping the Codex CLI usage window | off |
 | `--claude` / `--no-claude` | Ping the Claude CLI usage window | off |
 | `--until HH:MM` | End the active day at this time | ~9h |
 | `--lunch HH:MM[/MIN]` / `--no-lunch` | Idle lunch gap, `MIN` min long, jittered daily | off |
-| `--holidays` / `--no-holidays` | Skip public-holiday / PTO days entirely | on |
+| `--holidays` / `--no-holidays` | Skip public-holiday / PTO days entirely | off |
 | `--country CC` | ISO-3166 country for the holiday lookup (e.g. `US`, `PT`) | — |
 | `--good-morning "TEXT"` | Post `TEXT` to a webhook after apps open (`{time}` / `{date}` / `{day}` tokens) | off |
 | `--gm-platform slack\|teams` | Which webhook the greeting uses | slack |
@@ -81,8 +82,22 @@ wake. Defaults are plain constants at the top of the script.
               --good-morning "Online {day} {time}"
 ```
 
-Finer knobs (jiggle cadence/distance, start jitter, micro-break count/length,
-`EXTRA_SKIP_DATES` for PTO, log-size cap) are constants at the top of the script.
+## Config file
+
+Anything the flags cover — plus finer knobs (jiggle cadence/distance, start
+jitter, micro-break count/length, `EXTRA_SKIP_DATES` for PTO, log-size cap) —
+can be set once in `~/.config/alibi-to-5/.env` instead, so you never edit the
+script or retype flags:
+
+```
+mkdir -p ~/.config/alibi-to-5
+cp .env.example ~/.config/alibi-to-5/.env   # then uncomment what you want
+chmod 600 ~/.config/alibi-to-5/.env
+```
+
+Precedence: flags on `set`/`test` > `.env` > script defaults. The `.env` also
+holds the webhook URLs, so keep it `chmod 600` and out of any repo (`.gitignore`
+already excludes `.env`).
 
 ## Why the mouse jiggle
 
@@ -101,14 +116,10 @@ with a log line, never a crash.
 
 ## Good-morning webhook
 
-Needs a URL kept out of the repo:
+Needs a URL kept out of the repo — set `SLACK_WEBHOOK_URL` (or
+`TEAMS_WEBHOOK_URL`) in `~/.config/alibi-to-5/.env` (see the Config file section).
 
-```
-cp secrets.example ~/.config/alibi-to-5/secrets   # then add your Slack/Teams webhook URL
-chmod 600 ~/.config/alibi-to-5/secrets
-```
-
-Missing file or URL → the greeting is skipped and the rest of the wake runs fine.
+Missing URL → the greeting is skipped and the rest of the wake runs fine.
 (Teams is retiring classic incoming webhooks in favor of Workflows, which want an
 Adaptive Card payload — a plain-text post may not render there.)
 

@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Config file `~/.config/alibi-to-5/.env` (see `.env.example`): override any
+  default — feature toggles, workday shape, webhook URLs — without editing the
+  script. Precedence: flags > `.env` > script defaults.
+
+### Changed
+- **Breaking:** every feature toggle now defaults to OFF (Slack, Teams, Codex,
+  Claude, holiday skip). Opt in per feature via flags or the `.env` file.
+- **Breaking:** the separate secrets file (`~/.config/alibi-to-5/secrets`) is
+  replaced by the `.env` file; move your webhook URL(s) there.
+
+### Fixed
+- The wake-time Codex ping never opened a usage window: `codex exec` refused to
+  run from the LaunchAgent's untrusted cwd and waited on stdin. Now runs with
+  `--skip-git-repo-check` and stdin closed (Claude ping got the same stdin
+  guard).
+
 ## [1.0.0] - 2026-07-02
 
 First public release.

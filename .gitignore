@@ -8,7 +8,8 @@ BACKLOG.md
 # Logs (the routine writes to ~/Library/Logs, but ignore any stray local logs)
 *.log
 
-# Secrets: real webhook URLs live in ~/.config/alibi-to-5/secrets, but never
-# commit a local copy. The tracked template is secrets.example.
-secrets
-!secrets.example
+# Config/secrets: the real .env (with webhook URLs) lives in
+# ~/.config/alibi-to-5/.env, but never commit a local copy. The tracked
+# template is .env.example.
+.env
+!.env.example

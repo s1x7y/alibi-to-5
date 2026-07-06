@@ -75,7 +75,7 @@ MICROBREAK_MAX_MINUTES=12                           # each break's length, upper
 # back to sleep, you look genuinely offline). Public holidays come from the
 # Nager.Date API for COUNTRY_CODE, cached per year; EXTRA_SKIP_DATES adds manual
 # PTO/one-offs the API can't know. Fail-open: any lookup failure -> run normally.
-ENABLE_HOLIDAY_SKIP=1                               # master toggle (also --holidays/--no-holidays on 'set')
+ENABLE_HOLIDAY_SKIP=0                               # master toggle (also --holidays/--no-holidays on 'set')
 COUNTRY_CODE=""                                     # ISO-3166 alpha-2 (e.g. US, PT); empty -> no holiday lookup
 EXTRA_SKIP_DATES=()                                 # manual YYYY-MM-DD skip dates (PTO / one-offs)
 HOLIDAY_CACHE_DIR="$HOME/.config/alibi-to-5"        # cached holidays-<YYYY>.json lives here
@@ -84,23 +84,35 @@ HOLIDAY_CACHE_DIR="$HOME/.config/alibi-to-5"        # cached holidays-<YYYY>.jso
 MB_S_EPOCHS=()
 MB_E_EPOCHS=()
 
-# Feature toggles (defaults). Each is also a --flag / --no-flag on 'set', and the
-# resolved choice is baked into the LaunchAgent, so it applies on every wake.
-ENABLE_SLACK=1                                     # open Slack.app
+# Feature toggles (all off by default; opt in via flags or the .env file). Each
+# is also a --flag / --no-flag on 'set', and the resolved choice is baked into
+# the LaunchAgent, so it applies on every wake.
+ENABLE_SLACK=0                                     # open Slack.app
 ENABLE_TEAMS=0                                     # open Microsoft Teams.app
-ENABLE_CODEX=1                                     # ping the Codex CLI to start its usage window
+ENABLE_CODEX=0                                     # ping the Codex CLI to start its usage window
 ENABLE_CLAUDE=0                                    # ping the Claude CLI to start its usage window
 CODEX_PROMPT="are you there"
 CLAUDE_PROMPT="are you there"
 
 # Good-morning message: non-empty text (or --good-morning "TEXT" on 'set') posts to
 # a Slack/Teams incoming webhook after the apps open. {time}/{date}/{day} tokens are
-# interpolated at wake. Webhook URLs live OUTSIDE the repo, in SECRETS_FILE.
+# interpolated at wake. Webhook URLs live OUTSIDE the repo, in the .env file.
 GOOD_MORNING_TEXT=""
 GOOD_MORNING_PLATFORM="slack"                      # slack | teams
-SECRETS_FILE="$HOME/.config/alibi-to-5/secrets"    # sourced: SLACK_WEBHOOK_URL / TEAMS_WEBHOOK_URL
+# shellcheck disable=SC2034  # read indirectly (${!var}) by the greeting/doctor
+SLACK_WEBHOOK_URL=""                               # set in the .env file, never here
+# shellcheck disable=SC2034  # read indirectly (${!var}) by the greeting/doctor
+TEAMS_WEBHOOK_URL=""                               # set in the .env file, never here
 
 OPEN_APPS=()                                       # any OTHER apps to open (Slack/Teams have their own toggles)
+
+# Optional user config: any constant above (toggles, schedule shape, webhook
+# URLs) can be overridden in ~/.config/alibi-to-5/.env (see .env.example), so
+# you never edit this script. Sourced after the defaults, so it wins; flags on
+# 'set'/'test' still win over it. ALIBI_ENV_FILE overrides the path (tests).
+ENV_FILE="${ALIBI_ENV_FILE:-$HOME/.config/alibi-to-5/.env}"
+# shellcheck disable=SC1090
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
 # Absolute path to THIS script, baked into the agent so it can call us back.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -386,25 +398,19 @@ post_webhook() {
     --data "{\"text\":\"$(json_escape "$text")\"}" "$url" >>"$LOG" 2>&1
 }
 
-# Send the good-morning greeting when configured: source the out-of-repo secrets
-# file for the webhook URL, interpolate tokens, and post. Warn-and-skip on any
-# missing piece so a wake is never blocked by it.
+# Send the good-morning greeting when configured: the webhook URL comes from the
+# out-of-repo .env file (sourced at load), tokens are interpolated, then post.
+# Warn-and-skip on any missing piece so a wake is never blocked by it.
 send_good_morning() {
   local text=$1 platform=$2 url var
   [ -n "$text" ] || return 0
-  if [ ! -f "$SECRETS_FILE" ]; then
-    log "WARNING: good-morning set but $SECRETS_FILE missing; skipped."
-    return 0
-  fi
-  # shellcheck disable=SC1090
-  . "$SECRETS_FILE"
   case "$platform" in
     teams) var=TEAMS_WEBHOOK_URL ;;
     *)     var=SLACK_WEBHOOK_URL ;;
   esac
   url=${!var:-}
   if [ -z "$url" ]; then
-    log "WARNING: good-morning platform '$platform' has no $var in $SECRETS_FILE; skipped."
+    log "WARNING: good-morning platform '$platform' has no $var (set it in $ENV_FILE); skipped."
     return 0
   fi
   if post_webhook "$url" "$(interpolate "$text")"; then
@@ -502,19 +508,20 @@ Usage:
   alibi-to-5.sh status                Show schedule, state, window/lunch, log.
   alibi-to-5.sh help                  Show this help.
 
-Feature flags (for 'set' and 'test'; each overrides its config default and is
+Feature flags (for 'set' and 'test'; all OFF by default -- opt in per feature
+here or in ~/.config/alibi-to-5/.env. Each flag overrides its default and is
 baked into the agent, so it applies on every wake):
-  --slack / --no-slack        Open Slack.app                 (default: on)
-  --teams / --no-teams        Open Microsoft Teams.app        (default: off)
-  --codex / --no-codex        Ping the Codex CLI usage window (default: on)
-  --claude / --no-claude      Ping the Claude CLI usage window (default: off)
+  --slack / --no-slack        Open Slack.app
+  --teams / --no-teams        Open Microsoft Teams.app
+  --codex / --no-codex        Ping the Codex CLI usage window
+  --claude / --no-claude      Ping the Claude CLI usage window
   --good-morning "TEXT"       Post TEXT to a webhook after apps open (off if unset).
                               {time}/{date}/{day} tokens are filled in at wake.
   --gm-platform slack|teams   Which webhook the greeting uses (default: slack).
   --until HH:MM               End the active window at this time (default: ~9h).
   --lunch HH:MM[/MIN]         Idle lunch gap (default 45m), jittered daily.
   --no-lunch                  Disable the lunch gap.
-  --holidays / --no-holidays  Skip public-holiday/PTO days entirely (default: on).
+  --holidays / --no-holidays  Skip public-holiday/PTO days entirely (default: off).
                               Needs a country set; PTO via EXTRA_SKIP_DATES.
   --country CC                ISO-3166 country (e.g. US, PT) for the holiday
                               lookup (default: COUNTRY_CODE; empty = no lookup).
@@ -525,8 +532,12 @@ Example:
 
 The activity loop humanizes itself: randomized nudge cadence/distance, a random
 morning start delay, an optional jittered lunch gap where you naturally show
-"Away", and on-demand pause/resume. The greeting needs a webhook URL in
-~/.config/alibi-to-5/secrets (see secrets.example); it is never committed.
+"Away", and on-demand pause/resume.
+
+Config file: every default above (toggles, schedule shape, webhook URLs) can be
+set in ~/.config/alibi-to-5/.env (see .env.example) instead of flags or editing
+the script. Flags still win. The greeting's webhook URL lives there; it is
+never committed.
 EOF
 }
 
@@ -849,16 +860,10 @@ cmd_doctor() {
 
   # (c) Good-morning webhook config -- PRESENCE ONLY, never a POST (no channel noise).
   if [ -n "$GM_TEXT" ]; then
-    local var url
+    local var
     case "$GM_PLATFORM" in teams) var=TEAMS_WEBHOOK_URL ;; *) var=SLACK_WEBHOOK_URL ;; esac
-    if [ ! -f "$SECRETS_FILE" ]; then
-      say "FAIL  good-morning set but $SECRETS_FILE is missing."; hard_fail=1
-    else
-      # shellcheck disable=SC1090
-      url=$(. "$SECRETS_FILE" >/dev/null 2>&1; printf '%s' "${!var:-}")
-      if [ -n "$url" ]; then say "OK    good-morning webhook ($var) is set."
-      else say "FAIL  good-morning platform '$GM_PLATFORM' has no $var in $SECRETS_FILE."; hard_fail=1; fi
-    fi
+    if [ -n "${!var:-}" ]; then say "OK    good-morning webhook ($var) is set."
+    else say "FAIL  good-morning platform '$GM_PLATFORM' has no $var (set it in $ENV_FILE)."; hard_fail=1; fi
   fi
 
   # (d) Schedule + agent actually armed.
