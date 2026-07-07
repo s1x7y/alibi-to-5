@@ -22,6 +22,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run from the LaunchAgent's untrusted cwd and waited on stdin. Now runs with
   `--skip-git-repo-check` and stdin closed (Claude ping got the same stdin
   guard).
+- Slack/Teams could silently fail to open on a fresh wake (`open -a` reporting
+  success even though the app never stayed running) with no trace in the log.
+  Now checks `open`'s exit code and confirms the app is still running 2s
+  later, logging a `WARNING` either way instead of a blind "Opened".
 
 ## [1.0.0] - 2026-07-02
 

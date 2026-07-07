@@ -778,8 +778,15 @@ cmd_run() {
   apps+=(${OPEN_APPS[@]+"${OPEN_APPS[@]}"})
   for app in ${apps[@]+"${apps[@]}"}; do
     if app_installed "$app"; then
-      open -a "$app" >>"$LOG" 2>&1
-      log "Opened $app."
+      if ! open -a "$app" >>"$LOG" 2>&1; then
+        log "WARNING: 'open -a $app' failed (exit $?); not opened."
+      # open can exit 0 yet the app dies right after (e.g. no windowserver
+      # session yet on a fresh wake) -- confirm it's actually still running.
+      elif sleep 2 && pgrep -f "/${app}.app/Contents/MacOS/" >/dev/null; then
+        log "Opened $app."
+      else
+        log "WARNING: 'open -a $app' returned OK but $app is not running 2s later."
+      fi
     else
       log "WARNING: $app.app not found; skipped."
     fi
