@@ -7,6 +7,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `set-once YYYY-MM-DD HH:MM [flags]`: wake + run the routine a single time,
+  with no recurring schedule. Uses a one-time `pmset schedule wake` (self-
+  clearing after it fires) plus a Year-qualified `StartCalendarInterval`, so
+  the agent is guaranteed to fire exactly once by launchd itself — no cleanup
+  step required for correctness.
 - Config file `~/.config/alibi-to-5/.env` (see `.env.example`): override any
   default — feature toggles, workday shape, webhook URLs — without editing the
   script. Precedence: flags > `.env` > script defaults.

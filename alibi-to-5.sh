@@ -7,6 +7,8 @@
 # Commands you use:
 #   alibi-to-5.sh set [HH:MM] [flags]   Schedule a Mon-Fri wake + install agent.
 #                                       Prompts for the time if you omit it.
+#   alibi-to-5.sh set-once YYYY-MM-DD HH:MM [flags]
+#                                       Wake + run just once, no recurrence.
 #   alibi-to-5.sh unset                 Cancel the schedule, remove the agent,
 #                                       and stop a running routine.
 #   alibi-to-5.sh test [flags]          Run the routine now and show the log tail.
@@ -217,6 +219,23 @@ parse_duration() {
 # "HH:MM" -> today's epoch for that wall-clock time (macOS BSD date).
 hm_to_epoch() {
   date -j -f "%Y-%m-%d %H:%M" "$(date +%F) $1" +%s 2>/dev/null
+}
+
+# Validate + resolve a YYYY-MM-DD + HH:MM pair for 'set-once': echoes
+# "year month day hour min epoch" (unpadded ints) on success. Returns 1 on a
+# malformed date/time OR one that's already passed -- 'date -j' itself rejects
+# nonsense like a day 40 or month 13, so no separate range checks are needed.
+# Shared by cmd_set_once (to bake the plist) and its tests.
+parse_once_datetime() {
+  local date_str=$1 hm=$2 epoch year month day hour min
+  [[ "$date_str" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+  [[ "$hm" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || return 1
+  epoch=$(date -j -f "%Y-%m-%d %H:%M" "$date_str $hm" +%s 2>/dev/null) || return 1
+  [ -n "$epoch" ] || return 1
+  [ "$epoch" -gt "$(date +%s)" ] || return 1
+  year=$((10#${date_str:0:4})); month=$((10#${date_str:5:2})); day=$((10#${date_str:8:2}))
+  hour=$((10#${hm%%:*})); min=$((10#${hm##*:}))
+  printf '%s %s %s %s %s %s\n' "$year" "$month" "$day" "$hour" "$min" "$epoch"
 }
 
 # True (0) when NOW falls inside one of today's resolved micro-break windows,
@@ -496,6 +515,9 @@ alibi-to-5 - schedule a weekday Mac wake and run a wake routine.
 Usage:
   alibi-to-5.sh set [HH:MM] [flags]   Schedule a Mon-Fri wake + install the agent.
                                       Prompts for the time if you omit it.
+  alibi-to-5.sh set-once YYYY-MM-DD HH:MM [flags]
+                                      Wake + run the routine once, on that date
+                                      only -- no recurring schedule afterward.
   alibi-to-5.sh unset                 Cancel the schedule, remove the agent, and
                                       stop a running routine (caffeinate + loop).
   alibi-to-5.sh test [flags]          Run the routine now and show the log tail.
@@ -541,13 +563,13 @@ never committed.
 EOF
 }
 
-# ---- write_plist <hour> <minute> -----------------------------------------
-# Emits the LaunchAgent plist that runs "<this script> run" every weekday at
-# the given time. StartCalendarInterval (not RunAtLoad) means launchd fires it
-# on the scheduled wake even if you are already logged in.
-write_plist() {
-  local hour="$1" min="$2"; shift 2
-  local flags=("$@") f wd
+# ---- write_plist_common <calendar_xml> [flags...] -------------------------
+# Shared LaunchAgent body for both the recurring and one-shot agents: same
+# Label/AbandonProcessGroup/ProgramArguments, differing only in the
+# StartCalendarInterval block the caller supplies.
+write_plist_common() {
+  local calendar_xml="$1"; shift
+  local flags=("$@") f
   mkdir -p "$HOME/Library/LaunchAgents"
   {
     cat <<PLIST
@@ -571,28 +593,80 @@ write_plist() {
         <string>run</string>
 PLIST
     # The resolved feature flags, so the agent calls `run` with the same choices
-    # you made at `set` time. xml_escape guards user-supplied greeting text.
+    # you made at `set`/`set-once` time. xml_escape guards user-supplied greeting text.
     for f in ${flags[@]+"${flags[@]}"}; do
       printf '        <string>%s</string>\n' "$(xml_escape "$f")"
     done
     cat <<'PLIST'
     </array>
     <key>StartCalendarInterval</key>
-    <array>
 PLIST
-    # Weekday: 1=Mon ... 5=Fri
-    for wd in 1 2 3 4 5; do
-      printf '        <dict><key>Weekday</key><integer>%s</integer><key>Hour</key><integer>%s</integer><key>Minute</key><integer>%s</integer></dict>\n' "$wd" "$hour" "$min"
-    done
+    # $(...) strips calendar_xml's trailing newline; put it back so the closing
+    # tags below don't merge onto the same line.
+    printf '%s\n' "$calendar_xml"
     cat <<'PLIST'
-    </array>
 </dict>
 </plist>
 PLIST
   } >"$PLIST_PATH"
 }
 
+# ---- write_plist <hour> <minute> [flags...] -------------------------------
+# Emits the LaunchAgent plist that runs "<this script> run" every weekday at
+# the given time. StartCalendarInterval (not RunAtLoad) means launchd fires it
+# on the scheduled wake even if you are already logged in.
+write_plist() {
+  local hour="$1" min="$2"; shift 2
+  local wd calendar
+  calendar=$(
+    printf '    <array>\n'
+    for wd in 1 2 3 4 5; do   # Weekday: 1=Mon ... 5=Fri
+      printf '        <dict><key>Weekday</key><integer>%s</integer><key>Hour</key><integer>%s</integer><key>Minute</key><integer>%s</integer></dict>\n' "$wd" "$hour" "$min"
+    done
+    printf '    </array>\n'
+  )
+  write_plist_common "$calendar" "$@"
+}
+
+# ---- write_plist_once <year> <month> <day> <hour> <minute> [flags...] -----
+# Emits the LaunchAgent plist for a single wake, exactly once. Baking Year
+# into StartCalendarInterval (not just Month/Day/Hour/Minute, which would
+# recur every year) makes the one-shot guaranteed by launchd itself -- it
+# does not depend on any cleanup step running after the routine fires.
+write_plist_once() {
+  local year="$1" month="$2" day="$3" hour="$4" min="$5"; shift 5
+  local calendar
+  calendar=$(printf '    <dict>\n        <key>Year</key><integer>%s</integer>\n        <key>Month</key><integer>%s</integer>\n        <key>Day</key><integer>%s</integer>\n        <key>Hour</key><integer>%s</integer>\n        <key>Minute</key><integer>%s</integer>\n    </dict>\n' "$year" "$month" "$day" "$hour" "$min")
+  write_plist_common "$calendar" "$@"
+}
+
 # ---- set [HH:MM] ----------------------------------------------------------
+# ---- finish_arming <headline> [note-line...] ------------------------------
+# Common tail for 'set' and 'set-once' once the plist is written: (re)load the
+# agent, print the arming summary + manual steps, then run doctor in warn
+# mode. Only the headline and the command-specific note lines differ between
+# a recurring and a one-time schedule.
+finish_arming() {
+  local headline="$1"; shift
+  launchctl unload "$PLIST_PATH" 2>/dev/null || true
+  launchctl load "$PLIST_PATH"
+
+  say
+  say "$headline"
+  say "Enabled: slack=$FEAT_SLACK teams=$FEAT_TEAMS codex=$FEAT_CODEX claude=$FEAT_CLAUDE good-morning=$([ -n "$GM_TEXT" ] && echo "$GM_PLATFORM" || echo off)"
+  local line
+  for line in "$@"; do say "$line"; done
+  say
+  say "Manual steps:"
+  say "  * Keep the Mac ASLEEP (not shut down)."
+  say "  * System Settings -> Lock Screen -> require password 'Never' (keeps FileVault on)."
+  say
+  pmset -g sched
+  say
+  say "Preflight (doctor) -- warnings do not block the schedule:"
+  cmd_doctor "${CANON[@]}" || true
+}
+
 cmd_set() {
   # First arg is the optional HH:MM; anything starting with -- is a feature flag.
   local hm="${1:-}"
@@ -617,23 +691,45 @@ cmd_set() {
   sudo pmset repeat wake "$WAKE_DAYS" "$hm:00"
 
   write_plist "$hour" "$min" "${CANON[@]}"
-  launchctl unload "$PLIST_PATH" 2>/dev/null || true
-  launchctl load "$PLIST_PATH"
+  finish_arming "Done - wake + routine scheduled at $hm, Mon-Fri." \
+    "Runtime script: $SELF" \
+    "(If you move/rename this script, just run 'set' again.)"
+}
 
-  say
-  say "Done - wake + routine scheduled at $hm, Mon-Fri."
-  say "Enabled: slack=$FEAT_SLACK teams=$FEAT_TEAMS codex=$FEAT_CODEX claude=$FEAT_CLAUDE good-morning=$([ -n "$GM_TEXT" ] && echo "$GM_PLATFORM" || echo off)"
-  say "Runtime script: $SELF"
-  say "(If you move/rename this script, just run 'set' again.)"
-  say
-  say "Manual steps:"
-  say "  * Keep the Mac ASLEEP (not shut down)."
-  say "  * System Settings -> Lock Screen -> require password 'Never' (keeps FileVault on)."
-  say
-  pmset -g sched
-  say
-  say "Preflight (doctor) -- warnings do not block the schedule:"
-  cmd_doctor "${CANON[@]}" || true
+# ---- set-once <YYYY-MM-DD> <HH:MM> [flags] --------------------------------
+# Like 'set', but for a single wake instead of a recurring Mon-Fri schedule:
+# a one-time pmset wake (self-clearing after it fires, unlike 'repeat wake')
+# plus a Year-qualified LaunchAgent (see write_plist_once) that launchd will
+# only ever fire once. No self-cleanup step needed for correctness; 'unset'
+# still removes the leftover plist/pmset entry for tidiness, before or after.
+cmd_set_once() {
+  local date_str="${1:-}" hm="${2:-}"
+  case "$date_str" in ""|--*) date_str="" ;; esac
+  if [ -z "$date_str" ] || [ -z "$hm" ] || [[ "$hm" == --* ]]; then
+    say "ERROR: usage: set-once YYYY-MM-DD HH:MM [flags]"; exit 1
+  fi
+  shift 2
+
+  local resolved year month day hour min epoch
+  if ! resolved=$(parse_once_datetime "$date_str" "$hm"); then
+    say "ERROR: '$date_str $hm' is not a valid future date/time (YYYY-MM-DD HH:MM)."; exit 1
+  fi
+  read -r year month day hour min epoch <<<"$resolved"
+
+  parse_feature_flags "$@"
+  build_canonical_flags
+
+  say "Scheduling a one-time wake for $date_str $hm (needs admin password)..."
+  # 'schedule wake' (not 'repeat wake') is a single event; macOS clears it once
+  # fired. Derived from the already-resolved $epoch rather than re-parsing
+  # "$date_str $hm" a second time.
+  sudo pmset schedule wake "$(date -r "$epoch" +"%m/%d/%y %H:%M:%S")"
+
+  write_plist_once "$year" "$month" "$day" "$hour" "$min" "${CANON[@]}"
+  finish_arming "Done - one-time wake + routine scheduled for $date_str $hm." \
+    "This fires exactly once (the year is baked into the agent) -- no recurring" \
+    "schedule to worry about. Run 'unset' beforehand to cancel it, or anytime" \
+    "after to clear the leftover plist/pmset entry."
 }
 
 # ---- unset ----------------------------------------------------------------
@@ -963,6 +1059,7 @@ cmd_status() {
 main() {
   case "${1:-help}" in
     set)            shift; cmd_set "$@" ;;
+    set-once)       shift; cmd_set_once "$@" ;;
     unset)          cmd_unset ;;
     run)            shift; cmd_run "$@" ;;   # internal: invoked by the LaunchAgent
     test)           shift; cmd_test "$@" ;;

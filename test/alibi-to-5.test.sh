@@ -139,6 +139,25 @@ check "hm_to_epoch: numeric epoch" num "$hm"
 [ "${e2:-0}" -gt "${e1:-0}" ] && ord=ok || ord=bad
 check "hm_to_epoch: later time is larger" ok "$ord"
 
+# ---- parse_once_datetime (set-once validation) -----------------------------
+FUTURE_DATE=$(date -v+1y +%Y-%m-%d)   # always in the future, regardless of when tests run
+resolved=$(parse_once_datetime "$FUTURE_DATE" "09:30") && pod=ok || pod=rej
+check "parse_once_datetime: valid future date accepted" ok "$pod"
+read -r y mo da ho mi ep <<<"$resolved"
+check "parse_once_datetime: year field"   "${FUTURE_DATE%%-*}" "$y"
+check "parse_once_datetime: hour field"   9  "$ho"
+check "parse_once_datetime: minute field" 30 "$mi"
+case "$ep" in ''|*[!0-9]*) check "parse_once_datetime: epoch is numeric" num bad ;; *) check "parse_once_datetime: epoch is numeric" num num ;; esac
+
+parse_once_datetime "2020-01-01" "09:30" >/dev/null 2>&1 && pod=ok || pod=rej
+check "parse_once_datetime: past date rejected" rej "$pod"
+parse_once_datetime "not-a-date" "09:30" >/dev/null 2>&1 && pod=ok || pod=rej
+check "parse_once_datetime: malformed date rejected" rej "$pod"
+parse_once_datetime "$FUTURE_DATE" "25:99" >/dev/null 2>&1 && pod=ok || pod=rej
+check "parse_once_datetime: malformed time rejected" rej "$pod"
+parse_once_datetime "2026-02-30" "09:30" >/dev/null 2>&1 && pod=ok || pod=rej
+check "parse_once_datetime: invalid calendar date rejected" rej "$pod"
+
 # ---- schedule flags: parse + canonical round-trip -------------------------
 parse_feature_flags --until 17:00 --lunch 13:00/40
 check "flags: until"        17:00 "$FEAT_UNTIL"
@@ -222,6 +241,27 @@ awk '/<key>AbandonProcessGroup<\/key>/{getline; print}' "$PLIST_PATH" | grep -q 
 check "write_plist: AbandonProcessGroup is true" y "$wp"
 grep -q '<string>run</string>' "$PLIST_PATH" && wp=y || wp=n
 check "write_plist: still invokes run" y "$wp"
+grep -q '<key>Weekday</key>' "$PLIST_PATH" && wp=y || wp=n
+check "write_plist: weekly schedule uses Weekday" y "$wp"
+grep -q '<key>Year</key>' "$PLIST_PATH" && wp=y || wp=n
+check "write_plist: weekly schedule has no Year key" n "$wp"
+rm -f "$PLIST_PATH"
+
+# ---- write_plist_once: single guaranteed-once fire -------------------------
+# Year (not just Month/Day/Hour/Minute) must be baked in, or launchd would
+# refire this same wake next year -- that's the whole point of 'set-once'.
+PLIST_PATH="$(mktemp)"
+write_plist_once 2026 7 9 9 30 --codex
+grep -q '<key>AbandonProcessGroup</key>' "$PLIST_PATH" && wp=y || wp=n
+check "write_plist_once: sets AbandonProcessGroup key" y "$wp"
+grep -q '<key>Year</key><integer>2026</integer>' "$PLIST_PATH" && wp=y || wp=n
+check "write_plist_once: bakes in the Year" y "$wp"
+grep -q '<key>Month</key><integer>7</integer>' "$PLIST_PATH" && wp=y || wp=n
+check "write_plist_once: bakes in the Month" y "$wp"
+grep -q '<key>Day</key><integer>9</integer>' "$PLIST_PATH" && wp=y || wp=n
+check "write_plist_once: bakes in the Day" y "$wp"
+grep -q '<key>Weekday</key>' "$PLIST_PATH" && wp=y || wp=n
+check "write_plist_once: no recurring Weekday key" n "$wp"
 rm -f "$PLIST_PATH"
 
 # ---- log_needs_rotation (0 = rotate) --------------------------------------

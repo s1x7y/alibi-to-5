@@ -51,6 +51,7 @@ macOS runs the routine every weekday. Two one-time macOS settings:
 | Command | What it does |
 |---------|--------------|
 | `set [HH:MM] [flags]` | Arm the weekday wake + routine. Prompts for the time if omitted. Re-run to change it. |
+| `set-once YYYY-MM-DD HH:MM [flags]` | Wake + run the routine once, on that date only. No recurring schedule. |
 | `unset` | Cancel the schedule and stop a running routine. |
 | `test [flags]` | Run the routine right now. |
 | `doctor [flags]` | Preflight: Accessibility, CLIs, webhook, schedule, power. `set` runs it too. |
