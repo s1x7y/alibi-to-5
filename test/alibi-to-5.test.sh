@@ -143,7 +143,7 @@ check "hm_to_epoch: later time is larger" ok "$ord"
 FUTURE_DATE=$(date -v+1y +%Y-%m-%d)   # always in the future, regardless of when tests run
 resolved=$(parse_once_datetime "$FUTURE_DATE" "09:30") && pod=ok || pod=rej
 check "parse_once_datetime: valid future date accepted" ok "$pod"
-read -r y mo da ho mi ep <<<"$resolved"
+read -r y _ _ ho mi ep <<<"$resolved"
 check "parse_once_datetime: year field"   "${FUTURE_DATE%%-*}" "$y"
 check "parse_once_datetime: hour field"   9  "$ho"
 check "parse_once_datetime: minute field" 30 "$mi"
