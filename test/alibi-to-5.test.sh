@@ -158,6 +158,22 @@ check "parse_once_datetime: malformed time rejected" rej "$pod"
 parse_once_datetime "2026-02-30" "09:30" >/dev/null 2>&1 && pod=ok || pod=rej
 check "parse_once_datetime: invalid calendar date rejected" rej "$pod"
 
+# ---- resolve_next_hm (set-once auto-date) ----------------------------------
+FUTURE_HM="23:59"   # last minute of the day: still ahead of "now" except in that minute itself
+resolved=$(resolve_next_hm "$FUTURE_HM") && rn=ok || rn=rej
+check "resolve_next_hm: future-today time accepted" ok "$rn"
+read -r ds _ _ _ _ _ _ <<<"$resolved"
+check "resolve_next_hm: future-today time picks today" "$(date +%F)" "$ds"
+
+PAST_HM="00:01"   # first minute of the day: already passed except in that minute itself
+resolved=$(resolve_next_hm "$PAST_HM") && rn=ok || rn=rej
+check "resolve_next_hm: past-today time accepted" ok "$rn"
+read -r ds _ _ _ _ _ _ <<<"$resolved"
+check "resolve_next_hm: past-today time picks tomorrow" "$(date -v+1d +%F)" "$ds"
+
+resolve_next_hm "25:99" >/dev/null 2>&1 && rn=ok || rn=rej
+check "resolve_next_hm: malformed time rejected" rej "$rn"
+
 # ---- schedule flags: parse + canonical round-trip -------------------------
 parse_feature_flags --until 17:00 --lunch 13:00/40
 check "flags: until"        17:00 "$FEAT_UNTIL"

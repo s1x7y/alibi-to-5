@@ -7,8 +7,9 @@
 # Commands you use:
 #   alibi-to-5.sh set [HH:MM] [flags]   Schedule a Mon-Fri wake + install agent.
 #                                       Prompts for the time if you omit it.
-#   alibi-to-5.sh set-once YYYY-MM-DD HH:MM [flags]
-#                                       Wake + run just once, no recurrence.
+#   alibi-to-5.sh set-once HH:MM [flags]
+#                                       Wake + run just once, no recurrence. Fires
+#                                       today if that time hasn't passed, else tomorrow.
 #   alibi-to-5.sh unset                 Cancel the schedule, remove the agent,
 #                                       and stop a running routine.
 #   alibi-to-5.sh test [flags]          Run the routine now and show the log tail.
@@ -236,6 +237,22 @@ parse_once_datetime() {
   year=$((10#${date_str:0:4})); month=$((10#${date_str:5:2})); day=$((10#${date_str:8:2}))
   hour=$((10#${hm%%:*})); min=$((10#${hm##*:}))
   printf '%s %s %s %s %s %s\n' "$year" "$month" "$day" "$hour" "$min" "$epoch"
+}
+
+# Resolve a bare HH:MM to the next calendar day it lands on (today if that time
+# hasn't passed yet, else tomorrow), then delegate to parse_once_datetime for
+# the actual validation/epoch math. Echoes "date_str year month day hour min
+# epoch" on success; returns 1 on a malformed HH:MM.
+resolve_next_hm() {
+  local hm=$1 today tomorrow resolved
+  today=$(date +%F)
+  if resolved=$(parse_once_datetime "$today" "$hm"); then
+    printf '%s %s\n' "$today" "$resolved"; return 0
+  fi
+  [[ "$hm" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || return 1
+  tomorrow=$(date -j -v+1d +%F)
+  resolved=$(parse_once_datetime "$tomorrow" "$hm") || return 1
+  printf '%s %s\n' "$tomorrow" "$resolved"
 }
 
 # True (0) when NOW falls inside one of today's resolved micro-break windows,
@@ -515,9 +532,10 @@ alibi-to-5 - schedule a weekday Mac wake and run a wake routine.
 Usage:
   alibi-to-5.sh set [HH:MM] [flags]   Schedule a Mon-Fri wake + install the agent.
                                       Prompts for the time if you omit it.
-  alibi-to-5.sh set-once YYYY-MM-DD HH:MM [flags]
-                                      Wake + run the routine once, on that date
-                                      only -- no recurring schedule afterward.
+  alibi-to-5.sh set-once HH:MM [flags]
+                                      Wake + run the routine once -- today if that
+                                      time hasn't passed yet, else tomorrow. No
+                                      recurring schedule afterward.
   alibi-to-5.sh unset                 Cancel the schedule, remove the agent, and
                                       stop a running routine (caffeinate + loop).
   alibi-to-5.sh test [flags]          Run the routine now and show the log tail.
@@ -696,25 +714,26 @@ cmd_set() {
     "(If you move/rename this script, just run 'set' again.)"
 }
 
-# ---- set-once <YYYY-MM-DD> <HH:MM> [flags] --------------------------------
+# ---- set-once <HH:MM> [flags] ---------------------------------------------
 # Like 'set', but for a single wake instead of a recurring Mon-Fri schedule:
 # a one-time pmset wake (self-clearing after it fires, unlike 'repeat wake')
 # plus a Year-qualified LaunchAgent (see write_plist_once) that launchd will
 # only ever fire once. No self-cleanup step needed for correctness; 'unset'
 # still removes the leftover plist/pmset entry for tidiness, before or after.
+# The date is never typed: resolve_next_hm picks today or tomorrow, whichever
+# next hits HH:MM.
 cmd_set_once() {
-  local date_str="${1:-}" hm="${2:-}"
-  case "$date_str" in ""|--*) date_str="" ;; esac
-  if [ -z "$date_str" ] || [ -z "$hm" ] || [[ "$hm" == --* ]]; then
-    say "ERROR: usage: set-once YYYY-MM-DD HH:MM [flags]"; exit 1
+  local hm="${1:-}"
+  if [ -z "$hm" ] || [[ "$hm" == --* ]]; then
+    say "ERROR: usage: set-once HH:MM [flags]"; exit 1
   fi
-  shift 2
+  shift 1
 
-  local resolved year month day hour min epoch
-  if ! resolved=$(parse_once_datetime "$date_str" "$hm"); then
-    say "ERROR: '$date_str $hm' is not a valid future date/time (YYYY-MM-DD HH:MM)."; exit 1
+  local resolved date_str year month day hour min epoch
+  if ! resolved=$(resolve_next_hm "$hm"); then
+    say "ERROR: '$hm' is not a valid time (HH:MM)."; exit 1
   fi
-  read -r year month day hour min epoch <<<"$resolved"
+  read -r date_str year month day hour min epoch <<<"$resolved"
 
   parse_feature_flags "$@"
   build_canonical_flags
